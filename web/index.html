@@ -1,0 +1,260 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>PiPER アーム操作UI</title>
+<link rel="stylesheet" href="/static/css/style.css">
+</head>
+<body>
+
+<header class="topbar">
+  <div class="brand">
+    <span class="brand-mark"></span>
+    <div>
+      <h1>レモン自動収穫デモ</h1>
+      <p>犬型ロボット搭載アーム (PiPER) 操作UI</p>
+    </div>
+  </div>
+
+  <nav class="pager" role="tablist">
+    <button class="pager-btn" data-page="move" role="tab">移動用UI</button>
+    <button class="pager-btn is-active" data-page="arm" role="tab">アーム用UI</button>
+  </nav>
+
+  <div class="status-pills">
+    <span class="pill" id="pill-ros"><i></i>rosbridge</span>
+    <span class="pill" id="pill-video"><i></i>映像</span>
+    <span class="pill" id="pill-arm"><i></i>アーム</span>
+    <button class="estop" id="btn-estop">停止</button>
+  </div>
+</header>
+
+<!-- 遠隔（別ネットワーク）から見ているときの帯。手元では出ない -->
+<div class="alert alert-remote" id="alert-remote" hidden>
+  <strong id="remote-title">閲覧のみ</strong>
+  <span id="remote-detail">別ネットワークから接続しています。操作は手元で許可されている間だけできます。</span>
+  <button class="btn btn-small" id="btn-request-control">操作を申請</button>
+</div>
+
+<!-- 手元だけに出る。遠隔からの操作を一時的に許可する -->
+<div class="alert alert-grant" id="alert-grant" hidden>
+  <strong id="grant-title">遠隔から操作の申請があります</strong>
+  <span id="grant-detail"></span>
+  <button class="btn btn-small btn-primary" id="btn-grant-control">10分だけ許可</button>
+  <button class="btn btn-small" id="btn-revoke-control">許可を取り消す</button>
+</div>
+
+<!-- ノードの二重起動を検出したときの警告（通常は非表示） -->
+<div class="alert" id="alert-dup" hidden>
+  <strong>harvest_sequencer が二重に起動しています。</strong>
+  <span id="alert-dup-detail"></span>
+  画面の表示が高速に切り替わるのはこのためです。
+  端末で <code>ros2 node list | grep harvest_sequencer</code> を確認し、
+  <code>pkill -f harvest_sequencer</code> で止めてから launch し直してください。
+</div>
+
+<!-- ============================ アーム用UI ============================ -->
+<main class="page is-active" id="page-arm">
+  <div class="grid">
+
+    <!-- 左上: カメラ -->
+    <section class="panel panel-camera">
+      <div class="panel-head">
+        <h2>カメラ</h2>
+        <div class="panel-head-right">
+          <span class="tag" id="tag-detections">検出 0</span>
+          <label class="switch">
+            <input type="checkbox" id="chk-overlay" checked>
+            <span>検出枠</span>
+          </label>
+        </div>
+      </div>
+      <div class="video-wrap" id="video-wrap-arm">
+        <video id="video-arm" autoplay playsinline muted></video>
+        <canvas id="overlay-arm"></canvas>
+        <div class="video-hint" id="video-hint-arm">映像を接続中…</div>
+      </div>
+      <p class="panel-foot">枠をクリックすると把持対象を選択できます</p>
+    </section>
+
+    <!-- 右上: 3D ビュー（URDF をブラウザで描画）／ RViz 映像に切替可 -->
+    <section class="panel panel-viz">
+      <div class="panel-head">
+        <h2>3D ビュー</h2>
+        <div class="panel-head-right">
+          <span class="tag" id="tag-source">指令</span>
+          <span class="tag tag-ghost" id="tag-plan">計画なし</span>
+          <label class="switch">
+            <input type="checkbox" id="chk-rviz-input" checked>
+            <span>視点操作</span>
+          </label>
+          <div class="seg" id="viz-mode">
+            <button class="seg-btn is-active" data-viz="robot">3D</button>
+            <button class="seg-btn" data-viz="rviz">RViz</button>
+          </div>
+        </div>
+      </div>
+      <div class="viz-wrap">
+        <canvas id="robot-view"></canvas>
+        <div class="viz-hint" id="robot-hint">モデルを読み込み中…</div>
+        <div class="view-buttons" id="view-buttons">
+          <button data-view="back" title="後ろから">後</button>
+          <button data-view="front" title="正面から">前</button>
+          <button data-view="left" title="左から">左</button>
+          <button data-view="right" title="右から">右</button>
+          <button data-view="reset" title="視点を戻す">⟲</button>
+        </div>
+        <div class="rviz-wrap" id="rviz-wrap" hidden>
+          <video id="video-rviz" autoplay playsinline muted></video>
+          <div class="video-hint" id="video-hint-rviz">RViz を接続中…</div>
+        </div>
+        <canvas id="arm-view" hidden></canvas>
+      </div>
+      <div class="joint-table" id="joint-table"></div>
+    </section>
+
+    <!-- 左下: 操作 -->
+    <section class="panel panel-actions">
+      <div class="panel-head">
+        <h2>収穫シーケンス</h2>
+        <label class="switch switch-danger">
+          <input type="checkbox" id="chk-enable">
+          <span>UI操作を有効化</span>
+        </label>
+      </div>
+
+      <ol class="steps" id="steps">
+        <li data-state="SELECTING"><span>1</span>把持対象の選択</li>
+        <li data-state="PLANNING"><span>2</span>把持姿勢の計算</li>
+        <li data-state="GRASPING"><span>3</span>把持</li>
+        <li data-state="MOVING_TO_BASKET"><span>4</span>収穫位置へ移動</li>
+        <li data-state="RELEASING"><span>5</span>開放</li>
+      </ol>
+
+      <div class="actions">
+        <button class="act" data-cmd="start_selection">把持対象の選択</button>
+        <button class="act" data-cmd="plan_grasp">把持（把持姿勢の計算）</button>
+        <button class="act act-primary" data-cmd="grasp">把持</button>
+        <div class="act-row">
+          <span class="act-row-label">収穫位置</span>
+          <button class="act act-mini" data-cmd="goto_basket" data-index="1">①</button>
+          <button class="act act-mini" data-cmd="goto_basket" data-index="2">②</button>
+          <button class="act act-mini" data-cmd="goto_basket" data-index="3">③</button>
+        </div>
+        <button class="act act-accent" data-cmd="release">開放（収穫完了）</button>
+        <button class="act act-ghost" data-cmd="home">ホームへ戻す</button>
+      </div>
+
+      <details class="jog">
+        <summary>手動ジョグ（関節角度指定）</summary>
+        <div class="jog-grid" id="jog-grid"></div>
+        <div class="jog-foot">
+          <label>ステップ
+            <select id="jog-step">
+              <option value="0.02">0.02 rad</option>
+              <option value="0.04" selected>0.04 rad</option>
+              <option value="0.10">0.10 rad</option>
+            </select>
+          </label>
+          <div class="jog-grip">
+            <button class="act act-mini" data-gripper="open">開</button>
+            <button class="act act-mini" data-gripper="close">閉</button>
+          </div>
+        </div>
+      </details>
+
+      <!-- 座標指定。関節角度指定と同じ details トグルで並べる。
+           中身はシーケンサ側の IK（kinematics.py）が解く。 -->
+      <details class="jog" id="xyz-box">
+        <summary>座標指定（手先位置）</summary>
+
+        <div class="xyz-now">
+          <span class="xyz-now-label">現在</span>
+          <span class="xyz-now-val" id="xyz-current">—</span>
+          <button class="act act-mini" id="btn-xyz-pick" title="現在の手先位置を入力欄に入れる">取込</button>
+        </div>
+
+        <div class="xyz-grid" id="xyz-grid"></div>
+
+        <div class="jog-foot">
+          <label>ステップ
+            <select id="xyz-step">
+              <option value="0.005">5 mm</option>
+              <option value="0.01" selected>10 mm</option>
+              <option value="0.05">50 mm</option>
+            </select>
+          </label>
+          <button class="act act-mini act-primary" id="btn-xyz-move">この位置へ移動</button>
+        </div>
+
+        <p class="xyz-hint" id="xyz-hint"></p>
+      </details>
+    </section>
+
+    <!-- 右下: ロボットの状態 -->
+    <section class="panel panel-state">
+      <div class="panel-head">
+        <h2>ロボットの状態（犬型を含む）</h2>
+        <span class="tag" id="tag-count">収穫 0 個</span>
+      </div>
+      <div class="state-body">
+        <div class="map-wrap"><canvas id="robot-map"></canvas></div>
+        <dl class="readout" id="readout"></dl>
+      </div>
+      <div class="statusline">
+        <span class="state-badge" id="state-badge">待機</span>
+        <span id="state-message">システム待機中</span>
+        <div class="progress"><div id="progress-bar"></div></div>
+      </div>
+    </section>
+  </div>
+
+  <footer class="logbar">
+    <span class="logbar-label">ログ</span>
+    <ul id="log-list"></ul>
+  </footer>
+</main>
+
+<!-- ============================ 移動用UI ============================ -->
+<main class="page" id="page-move">
+  <div class="grid grid-move">
+    <section class="panel panel-camera">
+      <div class="panel-head"><h2>フロントカメラ</h2></div>
+      <div class="video-wrap">
+        <video id="video-front" autoplay playsinline muted></video>
+        <div class="video-hint" id="video-hint-front">映像を接続中…</div>
+      </div>
+    </section>
+
+    <section class="panel panel-camera">
+      <div class="panel-head"><h2>アーム用カメラ</h2></div>
+      <div class="video-wrap">
+        <video id="video-arm2" autoplay playsinline muted></video>
+      </div>
+    </section>
+
+    <section class="panel panel-move-actions">
+      <div class="panel-head"><h2>走行モード</h2></div>
+      <div class="actions actions-move">
+        <button class="act act-move" data-mode="move">移動</button>
+        <button class="act act-harvest" data-mode="harvest">収穫</button>
+        <button class="act act-return" data-mode="return">帰還</button>
+        <button class="act act-stop" data-mode="stop">ストップ</button>
+      </div>
+      <p class="panel-foot">
+        走行系ノードは別担当のため、ここでは <code>/dog_ui/mode</code> に
+        モード名を publish するだけの骨組みです。
+      </p>
+    </section>
+  </div>
+</main>
+
+<script src="/static/js/vendor/three.min.js"></script>
+<script src="/static/js/rosbridge.js"></script>
+<script src="/static/js/webrtc.js"></script>
+<script src="/static/js/armview.js"></script>
+<script src="/static/js/robotview.js"></script>
+<script src="/static/js/app.js"></script>
+</body>
+</html>

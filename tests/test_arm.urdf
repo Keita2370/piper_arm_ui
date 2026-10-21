@@ -1,0 +1,63 @@
+<?xml version="1.0"?>
+<!-- テスト用の 6 軸アーム。PiPER に寄せた寸法と関節構成にしてある。
+     本物の piper_description.urdf が無い環境でも運動学を検証できるように、
+     あえて rpy に 0 以外を入れて固定軸 XYZ の規約を踏む形にしている。 -->
+<robot name="test_arm">
+  <link name="base_link"/>
+  <link name="link1"/>
+  <link name="link2"/>
+  <link name="link3"/>
+  <link name="link4"/>
+  <link name="link5"/>
+  <link name="link6"/>
+  <link name="gripper_base"/>
+
+  <joint name="joint1" type="revolute">
+    <parent link="base_link"/><child link="link1"/>
+    <origin xyz="0 0 0.123" rpy="0 0 0"/>
+    <axis xyz="0 0 1"/>
+    <limit lower="-2.618" upper="2.618" effort="100" velocity="3"/>
+  </joint>
+
+  <joint name="joint2" type="revolute">
+    <parent link="link1"/><child link="link2"/>
+    <origin xyz="0 0 0" rpy="1.5708 0 -1.5708"/>
+    <axis xyz="0 0 1"/>
+    <limit lower="0" upper="3.14" effort="100" velocity="3"/>
+  </joint>
+
+  <joint name="joint3" type="revolute">
+    <parent link="link2"/><child link="link3"/>
+    <origin xyz="0.28503 0 0" rpy="0 0 -1.979"/>
+    <axis xyz="0 0 1"/>
+    <limit lower="-2.967" upper="0" effort="100" velocity="3"/>
+  </joint>
+
+  <joint name="joint4" type="revolute">
+    <parent link="link3"/><child link="link4"/>
+    <origin xyz="-0.021984 -0.25075 0" rpy="1.5708 0 0"/>
+    <axis xyz="0 0 1"/>
+    <limit lower="-1.745" upper="1.745" effort="100" velocity="3"/>
+  </joint>
+
+  <joint name="joint5" type="revolute">
+    <parent link="link4"/><child link="link5"/>
+    <origin xyz="0 0 0" rpy="-1.5708 0 0"/>
+    <axis xyz="0 0 1"/>
+    <limit lower="-1.22" upper="1.22" effort="100" velocity="3"/>
+  </joint>
+
+  <joint name="joint6" type="revolute">
+    <parent link="link5"/><child link="link6"/>
+    <origin xyz="0 -0.091 0" rpy="1.5708 0 0"/>
+    <axis xyz="0 0 1"/>
+    <limit lower="-2.094" upper="2.094" effort="100" velocity="3"/>
+  </joint>
+
+  <!-- 手先の先に固定で付く部分。チェーンの端が可動関節で終わらない
+       ケースも通ることを確かめるために入れてある。 -->
+  <joint name="joint6_to_gripper" type="fixed">
+    <parent link="link6"/><child link="gripper_base"/>
+    <origin xyz="0 0 0.02" rpy="0 0 0"/>
+  </joint>
+</robot>

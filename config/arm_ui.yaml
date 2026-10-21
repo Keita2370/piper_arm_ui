@@ -1,0 +1,159 @@
+# piper_arm_ui 設定ファイル
+# ros2 launch piper_arm_ui arm_ui.launch.py params_file:=<このファイル>
+
+/**/ui_server:
+  ros__parameters:
+    # HTTP / WebRTC シグナリングを待ち受けるアドレス
+    host: "0.0.0.0"
+    port: 8080
+
+    # rosbridge_server の待ち受けポート。ブラウザは ui_server の /rosbridge を
+    # 経由して繋ぐので、ここは ui_server が中継先として使う番号。
+    # launch の rosbridge_port:= と同じ値になるよう launch 側から上書きされる。
+    rosbridge_port: 9090
+
+    # --- 別ネットワークからの利用と権限 ---
+    # 公開用の待ち受けポート。0 で無効。
+    # ここに届いた接続は送信元に関わらず必ず遠隔（＝既定で閲覧のみ）扱いになる。
+    # トンネル(cloudflared/ngrok)はこのポートへ向けるのが確実。
+    # ヘッダ判定（下記）は中継の実装に依存するので、それだけに頼らない。
+    public_port: 0
+    # 「手元」とみなす送信元をカンマ区切りで。空なら既定
+    # （127.0.0.0/8, ::1/128, 10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16,
+    #   fc00::/7, 100.64.0.0/10 ← Tailscale などの VPN）。
+    # 手元だけがフル操作でき、遠隔に操作許可を出せる。
+    # トンネル経由（X-Forwarded-For が付く）は必ず遠隔扱いになる。
+    trusted_networks: ""
+    # false にすると遠隔からは一切操作できない（非常停止を除く完全な閲覧専用）。
+    # 一般公開する期間はこれを false にしておくのが安全。
+    allow_remote_control: true
+    # 1 回の許可で遠隔が操作できる秒数。切り忘れてもこの時間で自動的に閉じる。
+    control_grant_seconds: 600.0
+    # WebRTC の STUN/TURN をカンマ区切りで。同一 LAN や VPN なら空でよい。
+    # 別ネットワークから映像も見るときに要る:
+    #   ice_servers: "stun:stun.l.google.com:19302"
+    #   ice_servers: "stun:stun.l.google.com:19302,turn:user:pass@turn.example.com:3478"
+    ice_servers: ""
+
+    # --- カメラ (RealSense) ---
+    # realsense2_camera (humble) の既定トピック。旧構成やリマップ時は
+    # /camera/color/image_raw になることがあるので実機で ros2 topic list で確認する。
+    use_dummy_video: false
+    arm_camera_topic: "/camera/camera/color/image_raw"
+    # 犬型のフロントカメラは未定。空文字ならテストパターンになる。
+    front_camera_topic: ""
+    # raw か compressed。UI を別PCで動かして LAN 越しに映像を受けるときは
+    # compressed にする（<トピック名>/compressed を購読する）。
+    camera_transport: "raw"
+    video_width: 640
+    video_height: 480
+    video_fps: 15
+
+    # --- 3D ビュー（ブラウザで URDF を直接描画。既定の表示）---
+    # 空なら piper_description の URDF を自動で探す。
+    robot_description_file: ""
+    # メッシュ簡略化の格子 [m]。小さいほど精細で重い。
+    # 0.001 → 1.9MB(gzip 0.8MB) / 形状誤差 0.06mm
+    # 0.003 → 0.8MB            / 形状誤差 1.0mm
+    mesh_simplify_cell: 0.001
+
+    # --- RViz 画面（rviz_bridge が配信。start_rviz_bridge:=true のときだけ）---
+    rviz_image_topic: "/rviz_ui/image"
+    # rviz_bridge 側の width/height/fps と必ず揃えること。
+    # なめらかさは解像度より fps が効く。重いときは解像度を下げて fps を保つ。
+    rviz_width: 960
+    rviz_height: 540
+    rviz_fps: 20
+
+/**/rviz_bridge:
+  ros__parameters:
+    # 仮想ディスプレイ上で rviz2 を動かして画面を配信する。
+    # モニタ接続済みの実機で :0 の rviz2 をそのまま映したい場合は
+    # use_xvfb: false / display: ":0" / launch_rviz: false にする。
+    display: ":99"
+    use_xvfb: true
+    launch_rviz: true
+    rviz_config: ""          # 空なら launch が config/harvest.rviz を渡す
+    # UI の RViz パネルは実表示 600〜700px 幅なので 960x540 で足りる。
+    # 1280x720 にすると VP8 エンコードが 1 枚 30ms かかり fps が伸びない。
+    width: 960
+    height: 540
+    fps: 20.0
+    image_topic: "/rviz_ui/image"
+    allow_input: true        # ブラウザからの視点操作を許可
+    hide_docks: true         # 左右のドック(Displays/Views)を畳んで3Dビューを広く使う
+    # メニューバー・ツールバー・ステータスバーを消してモデルだけ映す。
+    # rviz2 を全画面(F11)にして実現する。RViz のメニューを触りたいときは false。
+    hide_chrome: true
+    chrome_delay: 3.0        # rviz2 の窓が出るまでの待ち [s]。遅い機体では伸ばす
+
+    # --- 初期視点（Orbit カメラ）---
+    # yaw = 3.14159 後ろから（既定） / 0 正面から / 1.5708 左から / -1.5708 右から
+    # pitch = 0 が真横、大きいほど見下ろす
+    apply_view: true
+    view_yaw: 3.14159
+    view_pitch: 0.25
+    view_distance: 1.2
+    view_focal_point: [0.1, 0.0, 0.2]
+    # auto = Xvfb のときだけソフトウェア GL を強制する。
+    # 実ディスプレイ(:0)に出すときに強制すると GPU 描画を捨てて遅くなる。
+    software_rendering: "auto"
+
+/**/harvest_sequencer:
+  ros__parameters:
+    # UI から joint_states を publish してアームを動かすか。
+    # 既存の joy_to_piper_jointstates と併用するため、既定では false（監視のみ）。
+    # UI 側の「UI操作を有効化」トグルでも実行時に切り替えられる。
+    enable_arm_command: false
+
+    # piper_ros 側のトピック名
+    joint_command_topic: "/joint_states"
+    joint_feedback_topic: "/joint_states_single"
+    end_pose_topic: "/end_pose"
+    arm_status_topic: "/arm_status"
+
+    # 状態配信レート [Hz]
+    state_publish_rate: 10.0
+
+    # 各シーケンスステップの模擬所要時間 [s]（実装差し替え時は不要）
+    stub_step_duration: 1.5
+
+    # piper 側の全体動作速度 [%]。0 = 指定せず piper の既定(100%)に任せる。
+    # デモで穏やかに動かしたいときは 20〜40 くらいにする。
+    motion_speed: 0
+    # グリッパ把持力。piper 側で 0.5〜3 にクリップされ ×1000 される。
+    gripper_effort: 1.0
+
+    # 収穫かごの位置プリセット（①②③）: [j1..j6] rad
+    # joint1（先頭の値）が置き場の方位をそのまま決める。
+    #   +2.094 = +120°（左後方） / -2.094 = -120°（右後方） / +1.047 = +60°（左斜め前）
+    # 置き場を動かすときは joint1 だけ変えればよい。
+    # 右下の俯瞰図もこの値から計算して描かれるので、変えれば図も追従する。
+    basket_pose_1: [2.094, 1.20, -1.00, 0.0, 0.40, 0.0]     # 左後方  0.265m
+    basket_pose_2: [-2.094, 1.20, -1.00, 0.0, 0.40, 0.0]    # 右後方  0.265m
+    basket_pose_3: [1.047, 0.90, -0.70, 0.0, 0.30, 0.0]     # 左斜め前 0.190m
+
+    # ホーム姿勢
+    home_pose: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+
+    # --- 座標指定（手先位置）---
+    # 空なら piper_description の URDF を自動で探す（launch 側から渡される）。
+    # URDF が見つからないときは座標指定だけが無効になり、
+    # 関節角指定（ジョグ）と収穫シーケンスはそのまま使える。
+    robot_description_file: ""
+    # 手先として扱うリンク。空なら joint6 の子リンク。
+    tcp_link: ""
+    # 手先リンクの原点から、実際に基準にしたい点までのオフセット [m]。
+    # URDF には「グリッパの指の間」を表すリンクが無いので、ここで足す。
+    # 既定の [0,0,0] では joint6 の子リンクの原点が基準になる。
+    # 合わせかたは README「座標指定を実機に合わせる」を参照。
+    tcp_offset: [0.0, 0.0, 0.0]
+    # 座標指定で 1 回に動かせる距離の上限 [m]。
+    # 単位を mm で入れてしまったときに大きく飛ぶのを防ぐための歯止め。
+    max_cartesian_step: 0.25
+
+/**/dummy_perception:
+  ros__parameters:
+    # 検出結果を模擬配信するレート [Hz]
+    rate: 2.0
+    num_targets: 3
