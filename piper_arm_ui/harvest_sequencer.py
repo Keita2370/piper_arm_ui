@@ -17,6 +17,7 @@
 """
 
 import json
+import math
 import os
 import time
 
@@ -63,12 +64,20 @@ from piper_arm_ui.team_status import TeamStatus
 # backend:=lemon で受け付けるコマンド（段階5まで）。それ以外（収穫位置・ジョグ・
 # 座標指定）は理由を出して何もしない。内部の状態機械を間違って動かさないため
 #   start_selection → 対象を解除 / plan_grasp → 把持姿勢へ移動 / grasp → 把持 /
-#   home → home へ / release → 開放 / abort → 停止
+#   home → home へ / release → 開放 / abort → 停止 /
+#   goto_basket → 記録した収穫位置へ / set_basket → いまの姿勢を収穫位置として記録 /
+#   jog・jog_xyz・move_to_xyz → 実機の関節角を基準に MoveIt で動かす / gripper → 開閉
 LEMON_COMMANDS = ('set_enable', 'select_target', 'clear_exclusions',
-                  'start_selection', 'plan_grasp', 'grasp', 'home', 'release', 'abort')
+                  'start_selection', 'plan_grasp', 'grasp', 'home', 'release', 'abort',
+                  'goto_basket', 'set_basket', 'jog', 'jog_xyz', 'move_to_xyz', 'gripper')
 
 # approach が済んだとみなす対象と、いまの対象が同じかの判定 [m]
 SAME_TARGET = 0.005
+
+# lemon のジョグ（関節・座標）は、前のジョグの指令からこの秒数より早く来たら無視する。
+# 画面の長押しの繰り返しが止まらなくなり、動き終わるたびに次を受け付けて
+# 動き続けたことがある（実機）。人が押す間隔はこれより長い
+JOG_MIN_INTERVAL = 0.5
 
 
 class Trajectory:
@@ -103,6 +112,8 @@ class HarvestSequencer(Node):
         # internal: 自前の状態機械＋軌道＋/joint_states（実機なしの開発用、従来どおり）
         # lemon:    チームの収穫システムのサービスを呼ぶ（ミニPC。/joint_states は使わない）
         self.declare_parameter('backend', 'internal')
+        # lemon の収穫位置①②③の記録（実機で置いて記録した関節角）。basket_store.py
+        self.declare_parameter('basket_file', '~/.ros/piper_arm_ui/basket_poses.json')
         self.declare_parameter('enable_arm_command', False)
         self.declare_parameter('joint_command_topic', '/joint_states')
         self.declare_parameter('joint_feedback_topic', '/joint_states_single')
@@ -165,6 +176,8 @@ class HarvestSequencer(Node):
         self.approached = None
         # 最後に「停止」を押した時刻。そのあとに返ってきた失敗は「停止で止めた」と出す
         self._stop_at = None
+        self._last_jog_at = None        # 最後にジョグの指令を受け取った時刻
+        self._jog_ignored = 0
         self.step_duration = float(p('stub_step_duration').value)
         self.motion_speed = max(0, min(100, int(p('motion_speed').value)))
         self.gripper_effort = float(p('gripper_effort').value)
@@ -244,7 +257,12 @@ class HarvestSequencer(Node):
         # クライアントだけ Reentrant のグループにし、結果は別スレッドで待つ
         # （lemon_backend.py）。ほかのコールバックは既定のグループのまま順に処理する
         self.callers = {}
+        self.baskets = None
         if self.backend == 'lemon':
+            from piper_arm_ui.basket_store import BasketStore
+            self.baskets = BasketStore(str(p('basket_file').value))
+            if self.baskets.error:
+                self.get_logger().warn(self.baskets.error)
             from piper_arm_ui.lemon_backend import make_callers
             self._service_group = ReentrantCallbackGroup()
             self.callers = make_callers(self, self._service_group)
@@ -730,6 +748,170 @@ class HarvestSequencer(Node):
         self._call('cancel_execute', CancelGoal.Request(), 'MoveIt の実行の取り消し')
         self._call('cancel_arm', CancelGoal.Request(), 'アームの軌道の取り消し')
 
+    def _lemon_goto_basket(self, cmd):
+        """「収穫位置 ①②③」: 記録した姿勢へ MoveIt で動かす（★アームが大きく動く）.
+
+        記録していない位置へは動かさない（basket_store.py の注記）。
+        着いたら「開放」で離す。
+        """
+        index = int(cmd.get('index', 0))
+        label = '収穫位置%sへ移動' % '①②③'[index - 1] if 1 <= index <= 3 else '収穫位置へ移動'
+        if not 1 <= index <= 3:
+            self._log('収穫位置は 1〜3 で指定してください', 'warn')
+            return
+        joints = self.baskets.get(index) if self.baskets else None
+        if joints is None:
+            self._log('%s: まだ記録されていません。アームをかごの上に置いて'
+                      '「いまの姿勢を記録」してください' % label, 'warn')
+            return
+        if not self._motion_gate(label):
+            return
+        self.approached = None
+
+        def ok(_message):
+            self.basket_index = index
+        self.basket_index = None
+        self._log('%sします' % label, 'info')
+        self._call('basket', joints, label, on_ok=ok)
+
+    def _lemon_set_basket(self, cmd):
+        """「いまの姿勢を①にする」: 実機の関節角を収穫位置として記録する（動かない）."""
+        index = int(cmd.get('index', 0))
+        if not 1 <= index <= 3:
+            self._log('収穫位置は 1〜3 で指定してください', 'warn')
+            return
+        mark = '①②③'[index - 1]
+        if not self._service_gate('収穫位置%sの記録' % mark):
+            return
+        busy = self.motion_busy()
+        if busy:
+            self._log('収穫位置%sの記録: いま「%s」が動いています。止まってから記録してください'
+                      % (mark, busy), 'warn')
+            return
+        fb_age = time.monotonic() - self.fb_stamp if self.fb_stamp else None
+        if fb_age is None or fb_age > 0.5:
+            self._log('収穫位置%sの記録: 実機の関節角が届いていません' % mark, 'error')
+            return
+        try:
+            item = self.baskets.set(index, self.fb_pose)
+        except (OSError, ValueError) as exc:
+            self._log('収穫位置%sを記録できません: %s' % (mark, exc), 'error')
+            return
+        self._log('収穫位置%sを記録しました（%s）' % (
+            mark, ', '.join('%.3f' % v for v in item['joints'])), 'info')
+
+    # ---- ジョグ・座標指定・グリッパ（lemon）------------------------------
+    # /joint_states には出さず、実機の関節角を基準にした目標を MoveIt で計画して動かす
+    # （lemon_backend.BasketMover）。1 回ごとに計画するので、押してから動くまで少しかかる。
+    def _jog_too_fast(self, label):
+        """ジョグの指令が続けざまに来ていないか（来ていたら無視する）."""
+        now = time.monotonic()
+        last, self._last_jog_at = self._last_jog_at, now
+        if last is not None and now - last < JOG_MIN_INTERVAL:
+            self._jog_ignored += 1
+            if self._jog_ignored in (1, 10, 100):
+                self._log('%s: 続けざまの入力を無視しました（%d 回）。1 回押すと 1 ステップ'
+                          '動きます' % (label, self._jog_ignored), 'warn')
+            return True
+        self._jog_ignored = 0
+        return False
+
+    def _fresh_joints(self, label):
+        """実機の関節角（0.5 s 以内に届いたもの）。無ければ理由を出して None."""
+        fb_age = time.monotonic() - self.fb_stamp if self.fb_stamp else None
+        if fb_age is None or fb_age > 0.5:
+            self._log('%s: 実機の関節角が届いていません' % label, 'error')
+            return None
+        return list(self.fb_pose)
+
+    def _move_joints(self, pose, label):
+        self.approached = None          # pregrasp から離れる
+        self.basket_index = None
+        self._call('joint_move', [float(v) for v in pose], label)
+
+    def _lemon_jog(self, cmd):
+        """関節ジョグ: 実機の関節角 ＋ delta へ MoveIt で動かす（★アームが動く）."""
+        idx = int(cmd.get('joint', 0))
+        delta = float(cmd.get('delta', 0.0))
+        if not 0 <= idx < 6 or delta == 0.0 or not math.isfinite(delta):
+            return
+        label = '関節ジョグ J%d' % (idx + 1)
+        if self._jog_too_fast(label):
+            return
+        if not self._motion_gate(label):
+            return
+        here = self._fresh_joints(label)
+        if here is None:
+            return
+        pose = list(here)
+        pose[idx] += delta
+        pose = clamp_pose(pose)
+        if abs(pose[idx] - here[idx]) < 1e-4:
+            self._log('%s: 可動域の端です' % label, 'warn')
+            return
+        self._move_joints(pose, label)
+
+    def _lemon_move_to_xyz(self, cmd):
+        """座標指定: 手先を x, y, z [m]（base_link）へ（★アームが動く）."""
+        try:
+            target = [float(cmd['x']), float(cmd['y']), float(cmd['z'])]
+        except (KeyError, TypeError, ValueError):
+            self._log('座標指定: x, y, z を数値で指定してください', 'warn')
+            return
+        if not all(math.isfinite(v) for v in target):
+            self._log('座標指定: x, y, z を数値で指定してください', 'warn')
+            return
+        self._lemon_move_tcp(target, '座標指定')
+
+    def _lemon_jog_xyz(self, cmd):
+        """座標ジョグ: 手先を x/y/z のどれかの向きに少しずらす（★アームが動く）."""
+        axis = int(cmd.get('axis', 0))
+        delta = float(cmd.get('delta', 0.0))
+        if not 0 <= axis < 3 or delta == 0.0 or not math.isfinite(delta):
+            return
+        if self._jog_too_fast('座標ジョグ'):
+            return
+        # 元栓・排他を先に見る（ほかの動くコマンドと同じ順。理由の出かたをそろえる）
+        if not self._motion_gate('座標ジョグ'):
+            return
+        if self.chain is None:
+            self._log('座標指定は使えません: %s' % self.chain_error, 'warn')
+            return
+        here = self._fresh_joints('座標ジョグ')
+        if here is None:
+            return
+        target = list(self.chain.fk_position(here))
+        target[axis] += delta
+        self._lemon_move_tcp(target, '座標ジョグ', here, gated=True)
+
+    def _lemon_move_tcp(self, target, label, here=None, gated=False):
+        if not gated and not self._motion_gate(label):
+            return
+        if here is None:
+            here = self._fresh_joints(label)
+            if here is None:
+                return
+        pose = self._solve_to(target, label, base=here)
+        if pose is None:
+            return
+        self._move_joints(pose, '%s (%.3f, %.3f, %.3f)' % ((label,) + tuple(target)))
+
+    def _lemon_gripper(self, cmd):
+        """グリッパの開閉（★グリッパが動く）.
+
+        開: /lemon_grasp/open（掴んだレモンを planning scene から外すのも相手がする）
+        閉: グリッパのコントローラへ直接（lemon_grasp に閉じるサービスが無い）
+        """
+        close = bool(cmd.get('close'))
+        label = 'グリッパを%s' % ('閉じる' if close else '開く')
+        if not self._motion_gate(label):
+            return
+        from std_srvs.srv import Trigger
+        if close:
+            self._call('gripper', GRIPPER_CLOSED, label)
+        else:
+            self._call('open', Trigger.Request(), label)
+
     def _lemon_clear_exclusions(self, _cmd):
         """「除外をクリア」ボタン: /lemon_target/clear_exclusions（アームは動かない）."""
         if not self._service_gate('除外のクリア'):
@@ -850,7 +1032,7 @@ class HarvestSequencer(Node):
     # ------------------------------------------------------------------ #
     # 座標指定（手先位置）
     # ------------------------------------------------------------------ #
-    def _solve_to(self, target, label):
+    def _solve_to(self, target, label, base=None):
         """手先を target [m] へ持っていく関節角を求める.
 
         返り値は関節角のリスト。無理なときは None を返し、
@@ -871,7 +1053,9 @@ class HarvestSequencer(Node):
                       % (label, target[0], target[1], target[2], hint), 'warn')
             return None
 
-        here = self.chain.fk_position(self.cmd_pose)
+        # 基準の関節角。internal は指令値、lemon は実機の関節角（指令値は使っていない）
+        base = list(base) if base is not None else self.cmd_pose
+        here = self.chain.fk_position(base)
         move = float(((target[0] - here[0]) ** 2 + (target[1] - here[1]) ** 2
                       + (target[2] - here[2]) ** 2) ** 0.5)
         if move > self.max_cartesian_step:
@@ -882,7 +1066,7 @@ class HarvestSequencer(Node):
                 % (label, move * 1000, self.max_cartesian_step * 1000), 'warn')
             return None
 
-        pose, err, ok = self.chain.solve_ik(target, q0=self.cmd_pose)
+        pose, err, ok = self.chain.solve_ik(target, q0=base)
         if not ok:
             self._log(
                 '%s: (%.3f, %.3f, %.3f) に届きませんでした'
@@ -1055,7 +1239,9 @@ class HarvestSequencer(Node):
             'harvest_count': self.harvest_count,
             'gripper': round(self.gripper, 4),
             'gripper_closed': self.gripper <= GRIPPER_CLOSED + 1e-6,
-            'command_joints': [round(v, 4) for v in self.cmd_pose],
+            # lemon では指令値を持たないので、実機の関節角を出す（関節の表・3Dビュー用）
+            'command_joints': [round(v, 4) for v in
+                               (self.fb_pose if self.backend == 'lemon' else self.cmd_pose)],
             'feedback_joints': [round(v, 4) for v in self.fb_pose],
             'feedback_gripper': round(self.fb_gripper, 4),
             'feedback_age': round(fb_age, 2) if fb_age is not None else None,
@@ -1071,7 +1257,7 @@ class HarvestSequencer(Node):
             # 座標指定用。tcp は「いま指令している関節角を順運動学にかけた
             # 手先位置」で、UI の入力欄と同じ基準になる。piper が出す
             # end_pose とは基準点が違うことがあるので、別の項目にしてある。
-            'tcp': self.tcp_position(),
+            'tcp': self.tcp_position(self.fb_pose if self.backend == 'lemon' else None),
             'tcp_available': self.chain is not None,
             'tcp_reason': self.chain_error,
             'tcp_link': self.chain.tcp_link if self.chain else '',
@@ -1091,6 +1277,8 @@ class HarvestSequencer(Node):
             'motion_busy': self.motion_busy() if self.callers else None,
             # いまの対象への approach が済んでいる（＝「把持」を押してよい）
             'approached': self._approached_current() if self.callers else False,
+            # 収穫位置①②③の記録（lemon）。記録していない位置へは動かさない
+            'baskets': self.baskets.snapshot() if self.baskets else None,
             'stamp': time.time(),
         }
         msg = String()

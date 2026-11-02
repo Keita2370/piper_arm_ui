@@ -290,8 +290,10 @@ body { display: flex; flex-direction: column; }
 .switch-danger input:checked { background: #a33; }
 
 /* ジョグ */
-.jog { margin: 2px 12px 10px; border-top: 1px solid var(--border); padding-top: 8px; }
-.jog summary { font-size: 12px; color: var(--text-dim); cursor: pointer; padding: 4px 0; }
+/* 収穫位置の記録（.record-box）も同じ見た目。ジョグとは別のクラスにしてあるのは、
+   ジョグ・座標指定のトグルの並びを数えるテスト（test_xyz_ui）と混ざらないように */
+.jog, .record-box { margin: 2px 12px 10px; border-top: 1px solid var(--border); padding-top: 8px; }
+.jog summary, .record-box summary { font-size: 12px; color: var(--text-dim); cursor: pointer; padding: 4px 0; }
 .jog-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 6px; margin-top: 8px; }
 .jog-joint { background: #101a25; border: 1px solid var(--border); border-radius: 8px;
              padding: 6px; text-align: center; }
@@ -458,7 +460,7 @@ body { display: flex; flex-direction: column; }
 .btn-small:hover { border-color: var(--accent); }
 .btn-small[hidden] { display: none; }
 /* .act は display を指定しているので、hidden を明示しないと隠れない */
-.act[hidden], .act-row[hidden] { display: none; }
+.act[hidden], .act-row[hidden], details.record-box[hidden] { display: none; }
 .btn-small.btn-primary {
   background: var(--accent-dark);
   border-color: var(--accent-dark);

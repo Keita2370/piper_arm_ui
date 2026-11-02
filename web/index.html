@@ -164,6 +164,20 @@
         <button class="act act-ghost" data-cmd="clear_exclusions" hidden>除外をクリア</button>
       </div>
 
+      <!-- 収穫位置①②③の記録（backend:=lemon のときだけ出す）。アームをかごの上に置いて押す。
+           誤って押さないよう折りたたみの中に置き、上書きのときは確認を出す -->
+      <details class="record-box" id="basket-record" hidden>
+        <summary>収穫位置の記録</summary>
+        <p class="xyz-hint">アームをかごの上に置いてから押すと、いまの関節角をその位置として記録します（アームは動きません）。</p>
+        <div class="act-row">
+          <span class="act-row-label">記録</span>
+          <button class="act act-mini" data-set-basket="1">①</button>
+          <button class="act act-mini" data-set-basket="2">②</button>
+          <button class="act act-mini" data-set-basket="3">③</button>
+        </div>
+        <p class="xyz-hint" id="basket-record-info"></p>
+      </details>
+
       <details class="jog">
         <summary>手動ジョグ（関節角度指定）</summary>
         <div class="jog-grid" id="jog-grid"></div>

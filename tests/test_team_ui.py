@@ -156,7 +156,7 @@ with sync_playwright() as pw:
       const P = CanvasRenderingContext2D.prototype;
       const sr = P.strokeRect, ft = P.fillText;
       P.strokeRect = function (...a) { window.__draw.push({k: 'rect', c: this.strokeStyle, w: this.lineWidth}); return sr.apply(this, a); };
-      P.fillText = function (t, ...a) { window.__draw.push({k: 'text', t: String(t)}); return ft.call(this, t, ...a); };
+      P.fillText = function (t, ...a) { window.__draw.push({k: 'text', t: String(t), x: a[0], y: a[1], id: this.canvas.id}); return ft.call(this, t, ...a); };
     ''')
     errors = []
     page.on('pageerror', lambda e: errors.append(str(e)))
@@ -294,8 +294,10 @@ with sync_playwright() as pw:
           page.inner_text('.act[data-cmd="start_selection"]') == '対象を解除')
     check('lemon では「開放（収穫完了）」が「開放」になる',
           page.inner_text('.act[data-cmd="release"]') == '開放')
-    check('lemon では収穫位置①②③を隠す（相手に無い、計画書 §6）',
-          not page.is_visible('#basket-row'))
+    check('lemon でも収穫位置①②③を出す', page.is_visible('#basket-row'))
+    check('記録していない収穫位置は押せない（測っていない位置へは動かさない）',
+          all(page.is_disabled('.act[data-cmd="goto_basket"][data-index="%d"]' % i) for i in (1, 2, 3)))
+    check('lemon では「収穫位置の記録」を出す', page.is_visible('#basket-record > summary'))
     check('ホームへ戻すは押せる', not page.is_disabled('.act[data-cmd="home"]'))
     check('開放は押せる', not page.is_disabled('.act[data-cmd="release"]'))
     check('対象が固定されていれば「対象を解除」を押せる',
@@ -352,6 +354,177 @@ with sync_playwright() as pw:
     check('終わったら「UI の操作」に最後の結果を出す',
           'reached' in row(page, 'ui')[0] and 'k-ok' in row(page, 'ui')[1], row(page, 'ui'))
 
+    # ---- 収穫位置①②③の記録と移動 -------------------------------------------
+    recorded = {'1': {'recorded': True, 'joints': [1.2, 0.8, -0.9, 0, 0.5, -0.2],
+                      'recorded_at': '2026-11-02 16:30:00'},
+                '2': {'recorded': False}, '3': {'recorded': False}}
+    stack.state = dict(lemon, baskets=recorded)
+    settle(page)
+    check('記録した収穫位置①は押せる',
+          not page.is_disabled('.act[data-cmd="goto_basket"][data-index="1"]'))
+    check('記録していない②は押せないまま',
+          page.is_disabled('.act[data-cmd="goto_basket"][data-index="2"]'))
+    check('①の記録の時刻を出す（ボタンの説明）',
+          '16:30' in (page.get_attribute('.act[data-cmd="goto_basket"][data-index="1"]', 'title') or ''))
+    stack.published.clear()
+    page.click('.act[data-cmd="goto_basket"][data-index="1"]')
+    page.wait_for_timeout(300)
+    cmds = [json.loads(op['msg']['data']) for op in stack.published
+            if op.get('topic') == '/arm_ui/command']
+    check('①を押すと goto_basket index=1 を送る', {'cmd': 'goto_basket', 'index': 1} in cmds, cmds)
+
+    page.click('#basket-record > summary')
+    page.wait_for_timeout(150)
+    check('記録の状況を出す', '① 2026-11-02 16:30:00' in page.inner_text('#basket-record-info')
+          and '② 未記録' in page.inner_text('#basket-record-info'), page.inner_text('#basket-record-info'))
+
+    def record_cmds():
+        return [json.loads(op['msg']['data']) for op in stack.published
+                if op.get('topic') == '/arm_ui/command'
+                and json.loads(op['msg']['data']).get('cmd') == 'set_basket']
+
+    stack.published.clear()
+    page.click('[data-set-basket="2"]')
+    page.wait_for_timeout(300)
+    check('未記録の②は確認なしで記録を送る', record_cmds() == [{'cmd': 'set_basket', 'index': 2}],
+          record_cmds())
+    dialogs = []
+    page.once('dialog', lambda d: (dialogs.append(d.message), d.dismiss()))
+    stack.published.clear()
+    page.click('[data-set-basket="1"]')
+    page.wait_for_timeout(300)
+    check('記録済みの①は上書きしてよいか確かめる', dialogs and '上書き' in dialogs[0], dialogs)
+    check('確認で「キャンセル」なら送らない', record_cmds() == [], record_cmds())
+    page.once('dialog', lambda d: d.accept())
+    stack.published.clear()
+    page.click('[data-set-basket="1"]')
+    page.wait_for_timeout(300)
+    check('確認で「OK」なら送る', record_cmds() == [{'cmd': 'set_basket', 'index': 1}], record_cmds())
+
+    stack.state = dict(lemon, baskets=recorded, motion_busy='basket',
+                       calls={'basket': {'busy': True, 'success': None, 'message': None, 'age': None}})
+    settle(page)
+    check('移動中は収穫位置も記録も押せない',
+          page.is_disabled('.act[data-cmd="goto_basket"][data-index="1"]')
+          and page.is_disabled('[data-set-basket="1"]'))
+    check('「UI の操作」に「収穫位置へ移動中」と出る', '収穫位置へ移動中' in row(page, 'ui')[0],
+          row(page, 'ui'))
+
+    # ---- 手動ジョグ・座標指定（lemon でも使える。元栓と動作中を効かせる）------------
+    def jog_disabled():
+        return page.evaluate('''() => [...document.querySelectorAll(
+            '#jog-grid button, [data-gripper], #btn-xyz-move')].map(b => b.disabled)''')
+
+    stack.state = dict(lemon, baskets=recorded)
+    settle(page)
+    check('lemon でもジョグ・グリッパ・座標指定のボタンを押せる',
+          jog_disabled() and not any(jog_disabled()), jog_disabled()[:4])
+    stack.state = dict(lemon, enable_arm_command=False)
+    settle(page)
+    check('UI操作が OFF ならジョグも押せない', all(jog_disabled()), jog_disabled()[:4])
+    stack.state = dict(lemon, motion_busy='joint_move',
+                       calls={'joint_move': {'busy': True, 'success': None, 'message': None, 'age': None}})
+    settle(page)
+    check('ジョグで動いている間は押せない', all(jog_disabled()), jog_disabled()[:4])
+    check('「UI の操作」に「関節を移動中」と出る', '関節を移動中' in row(page, 'ui')[0], row(page, 'ui'))
+
+    # ---- 右下の図: 収穫位置①②③は記録した姿勢から描く（lemon）--------------------
+    def map_marks():
+        page.evaluate('() => { window.__draw = []; }')
+        page.wait_for_timeout(350)
+        d = page.evaluate('() => window.__draw')
+        w = page.evaluate('() => document.querySelector("#robot-map").getBoundingClientRect().width')
+        return {t['t']: t['x'] for t in d
+                if t['k'] == 'text' and t.get('id') == 'robot-map' and t['t'] in '①②③'}, w
+
+    stack.state = dict(lemon, baskets=recorded)          # ①だけ記録（joint1 = +1.2 rad）
+    settle(page)
+    marks, width = map_marks()
+    check('lemon の図には記録した収穫位置だけを描く（①だけ）', set(marks) == {'①'}, marks)
+    check('①は joint1 の向きどおり左側（joint1 が正＝左）', marks.get('①', width) < width / 2,
+          (marks, width))
+    right = {'1': {'recorded': False},
+             '2': {'recorded': True, 'joints': [-1.2, 0.8, -0.9, 0, 0.5, 0], 'recorded_at': 'x'},
+             '3': {'recorded': False}}
+    stack.state = dict(lemon, baskets=right)
+    settle(page)
+    marks, width = map_marks()
+    check('記録した位置が変わると図も変わる（②だけ・右側）',
+          set(marks) == {'②'} and marks['②'] > width / 2, (marks, width))
+    stack.state = dict(lemon, baskets={'1': {'recorded': False}, '2': {'recorded': False},
+                                       '3': {'recorded': False}})
+    settle(page)
+    marks, _ = map_marks()
+    check('何も記録していなければ図に収穫位置を描かない（仮の値は出さない）', marks == {}, marks)
+
+    # ---- 長押しの繰り返しが止まらなかった件（実機で、動き続けた）---------------
+    def jog_cmds():
+        return [json.loads(op['msg']['data']) for op in stack.published
+                if op.get('topic') == '/arm_ui/command'
+                and json.loads(op['msg']['data']).get('cmd') in ('jog', 'jog_xyz')]
+
+    def hold(selector, ms, disable_midway=False, release_outside=True):
+        page.locator(selector).first.scroll_into_view_if_needed()
+        box = page.locator(selector).first.bounding_box()
+        page.mouse.move(box['x'] + box['width'] / 2, box['y'] + box['height'] / 2)
+        page.mouse.down()
+        page.wait_for_timeout(ms // 2)
+        if disable_midway:          # 押している間にボタンが押せなくなる（lemon で起きたこと）
+            page.evaluate('(s) => { document.querySelector(s).disabled = true; }', selector)
+        page.wait_for_timeout(ms // 2)
+        if release_outside:
+            page.mouse.move(5, 5)   # ボタンの外で離す
+        page.mouse.up()             # そうでなければ、押せなくなったボタンの上で離す（mouseup が届かない）
+
+    page.evaluate('() => document.querySelectorAll("details.jog").forEach(d => d.open = true)')
+    jog_btn = '#jog-grid .jog-joint:nth-child(1) button[data-dir="1"]'
+    stack.state = dict(lemon, baskets=recorded)
+    settle(page)
+    stack.published.clear()
+    hold(jog_btn, 800)
+    page.wait_for_timeout(600)
+    check('lemon では長押ししても 1 回だけ送る（1 回押す = 1 ステップ）', len(jog_cmds()) == 1,
+          '%d 回' % len(jog_cmds()))
+    stack.published.clear()
+    hold(jog_btn, 800, disable_midway=True)
+    page.wait_for_timeout(600)
+    check('押している間にボタンが押せなくなっても、送り続けない', len(jog_cmds()) <= 1,
+          len(jog_cmds()))
+
+    stack.state = dict(BASE_STATE, team=team())
+    settle(page)
+    page.evaluate('(s) => { document.querySelector(s).disabled = false; }', jog_btn)
+    stack.published.clear()
+    hold(jog_btn, 800)
+    n_hold = len(jog_cmds())
+    check('internal では長押しで繰り返す（従来どおり）', n_hold >= 4, n_hold)
+    page.wait_for_timeout(600)
+    check('ボタンの外で離しても繰り返しが止まる', len(jog_cmds()) == n_hold, (n_hold, len(jog_cmds())))
+    stack.published.clear()
+    hold(jog_btn, 800, disable_midway=True)
+    page.wait_for_timeout(100)
+    n_hold = len(jog_cmds())
+    page.wait_for_timeout(800)
+    check('internal でも、押せなくなったボタンの繰り返しは止まる', len(jog_cmds()) == n_hold,
+          (n_hold, len(jog_cmds())))
+    page.evaluate('(s) => { document.querySelector(s).disabled = false; }', jog_btn)
+    stack.published.clear()
+    hold(jog_btn, 800, disable_midway=True, release_outside=False)
+    page.wait_for_timeout(100)
+    n_hold = len(jog_cmds())
+    page.wait_for_timeout(800)
+    check('押せなくなったボタンの上で離しても、繰り返しは止まる（実機で起きた形）',
+          len(jog_cmds()) == n_hold, (n_hold, len(jog_cmds())))
+    page.evaluate('(s) => { document.querySelector(s).disabled = false; }', jog_btn)
+    stack.state = dict(lemon, baskets=recorded)
+    settle(page)
+    stack.published.clear()
+    hold(jog_btn, 800, disable_midway=True, release_outside=False)
+    page.wait_for_timeout(800)
+    check('lemon でも、押せなくなったボタンの上で離して送り続けない', len(jog_cmds()) <= 1,
+          '%d 回' % len(jog_cmds()))
+    page.evaluate('(s) => { document.querySelector(s).disabled = false; }', jog_btn)
+
     stack.state = dict(BASE_STATE, team=team())          # internal に戻す
     settle(page)
     check('internal では元のラベルに戻る',
@@ -359,7 +532,11 @@ with sync_playwright() as pw:
           and page.inner_text('.act[data-cmd="plan_grasp"]') == '把持（把持姿勢の計算）'
           and page.inner_text('.act[data-cmd="release"]') == '開放（収穫完了）')
     check('internal では収穫位置を出す', page.is_visible('#basket-row'))
+    marks, _ = map_marks()
+    check('internal の図は従来どおり設定の 3 か所', set(marks) == {'①', '②', '③'}, marks)
+    check('internal では「収穫位置の記録」を出さない', not page.is_visible('#basket-record > summary'))
     check('internal ではホームを押せる', not page.is_disabled('.act[data-cmd="home"]'))
+    check('internal ではジョグをいつでも押せる', not any(jog_disabled()), jog_disabled()[:4])
 
     check('コンソールエラーなし', not errors, errors[:3])
     browser.close()

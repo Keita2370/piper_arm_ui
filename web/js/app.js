@@ -92,6 +92,41 @@
   let hoverId = null;
   const logs = [];
 
+  // 長押しの繰り返し（関節ジョグ・座標ジョグ）。
+  // 押せなくなったボタン（disabled）には mouseup が届かないので、ボタンの上でなくても
+  // どこかで離したら止める。lemon で、押した直後にボタンが押せなくなり、離しても
+  // 繰り返しが止まらず、動き終わるたびに次のジョグが受け付けられて動き続けた
+  const activeRepeats = new Set();
+  function stopAllRepeats() { Array.from(activeRepeats).forEach((stop) => stop()); }
+  ['mouseup', 'touchend', 'touchcancel', 'pointerup', 'pointercancel', 'blur'].forEach((e) =>
+    window.addEventListener(e, stopAllRepeats));
+  document.addEventListener('visibilitychange', stopAllRepeats);
+
+  function holdRepeat(b, send, intervalMs) {
+    let timer = null;
+    const stop = () => {
+      if (timer) { clearInterval(timer); timer = null; }
+      activeRepeats.delete(stop);
+    };
+    const start = (ev) => {
+      ev.preventDefault();
+      if (b.disabled) return;
+      send();
+      // lemon は 1 回ごとに MoveIt が計画して動く。繰り返すと、動き終わるたびに
+      // 次を受け付けて止まらなくなるので、1 回押す = 1 ステップにする
+      if (latest && latest.backend === 'lemon') return;
+      timer = setInterval(() => {
+        if (b.disabled) { stop(); return; }
+        send();
+      }, intervalMs);
+      activeRepeats.add(stop);
+    };
+    b.addEventListener('mousedown', start);
+    b.addEventListener('touchstart', start, { passive: false });
+    ['mouseup', 'mouseleave', 'touchend', 'touchcancel'].forEach((e) =>
+      b.addEventListener(e, stop));
+  }
+
   // ---------------------------------------------------------------- ROS
   let serverInfo = {};
   try {
@@ -298,19 +333,9 @@
         cmd: 'jog_xyz', axis,
         delta: Number(b.dataset.dir) * Number(el.xyzStep.value),
       });
-      let timer = null;
-      const start = (ev) => {
-        ev.preventDefault();
-        send();
-        // 関節ジョグより間隔を広く取る。1回ごとに IK を解くうえ、
-        // 連打すると目標が現在位置から離れていきやすい。
-        timer = setInterval(send, 220);
-      };
-      const stop = () => { if (timer) { clearInterval(timer); timer = null; } };
-      b.addEventListener('mousedown', start);
-      b.addEventListener('touchstart', start, { passive: false });
-      ['mouseup', 'mouseleave', 'touchend', 'touchcancel'].forEach((e) =>
-        b.addEventListener(e, stop));
+      // 関節ジョグより間隔を広く取る。1回ごとに IK を解くうえ、
+      // 連打すると目標が現在位置から離れていきやすい。
+      holdRepeat(b, send, 220);
     });
     el.xyzGrid.appendChild(wrap);
   });
@@ -681,12 +706,21 @@
   let basketCache = { key: '', value: null };
 
   function basketPositions(state) {
-    const poses = state.basket_poses;
+    // lemon: 実機で置いて記録した姿勢（state.baskets）から描く。記録していない位置は
+    // null にして描かない（config の仮の値は実機と合っていないので、図にも出さない）
+    let poses = state.basket_poses;
+    if (state.backend === 'lemon' && state.baskets) {
+      poses = ['1', '2', '3'].map((i) => {
+        const rec = state.baskets[i] || {};
+        return rec.recorded ? rec.joints : null;
+      });
+    }
     if (!Array.isArray(poses) || !poses.length) return null;
     const key = JSON.stringify(poses) + (robotReady ? '|fk' : '|approx');
     if (basketCache.key === key) return basketCache.value;
 
     const value = poses.map((q) => {
+      if (!q) return null;
       if (robotView && robotReady) {
         const p = robotView.fkGripper(q);
         if (p) return { x: p.x, y: p.y };
@@ -790,6 +824,7 @@
     go_home: 'ホームへ移動中', open: 'グリッパを開いています', release: '対象を解除中',
     select: '対象を選択中', clear_exclusions: '除外をクリア中', stop: '停止を要求中',
     approach: '把持姿勢へ移動中', grasp: '把持中（差し込み・閉じる・戻り）',
+    basket: '収穫位置へ移動中', joint_move: '関節を移動中（MoveIt）', gripper: 'グリッパを閉じています',
   };
   function uiCallText(state) {
     const calls = state.calls || {};
@@ -849,6 +884,9 @@
     });
   }
 
+  // 手動ジョグ・座標指定・グリッパのボタン（lemon では元栓と「動作中か」を効かせる）
+  const JOG_BUTTONS = '#jog-grid button, [data-gripper], .xyz-axis button, #btn-xyz-move';
+
   function updateButtons(state) {
     const s = state.state;
     const enable = (sel, cond) => $$(sel).forEach((b) => { b.disabled = !cond; });
@@ -863,8 +901,28 @@
       const on = !!state.enable_arm_command;
       const moving = !!state.motion_busy;
       const locked = !!(state.team && state.team.target && state.team.target.locked);
+      // 収穫位置①②③: 記録した位置だけ押せる（測っていない位置へは動かさない）
+      const baskets = state.baskets || {};
       const basket = $('#basket-row');
-      if (basket) basket.hidden = true;
+      if (basket) basket.hidden = false;
+      $$('[data-cmd="goto_basket"]').forEach((b) => {
+        const rec = baskets[b.dataset.index] || {};
+        b.disabled = !(on && !moving && rec.recorded);
+        b.title = rec.recorded ? `記録 ${rec.recorded_at}: ${rec.joints.map((v) => v.toFixed(2)).join(', ')}`
+          : 'まだ記録されていません（「収穫位置の記録」で記録）';
+      });
+      const record = $('#basket-record');
+      if (record) record.hidden = false;
+      enable('[data-set-basket]', on && !moving);
+      const info = $('#basket-record-info');
+      if (info) {
+        info.textContent = ['1', '2', '3'].map((i) => {
+          const rec = baskets[i] || {};
+          return `${'①②③'[i - 1]} ${rec.recorded ? rec.recorded_at : '未記録'}`;
+        }).join(' / ');
+      }
+      // 手動ジョグ・座標指定・グリッパ: lemon では MoveIt で動かす。動いている間は押せない
+      enable(JOG_BUTTONS, on && !moving);
       enable('[data-cmd="home"]', on && !moving);
       enable('[data-cmd="release"]', on && !moving);
       enable('[data-cmd="start_selection"]', on && !moving && locked);
@@ -876,7 +934,11 @@
     }
     const basket = $('#basket-row');
     if (basket) basket.hidden = false;
+    const record = $('#basket-record');
+    if (record) record.hidden = true;
+    $$('[data-cmd="goto_basket"]').forEach((b) => { b.title = ''; });
     // lemon で押せなくしたものを戻す（internal ではいつでも押せる）
+    enable(JOG_BUTTONS, true);
     enable('[data-cmd="home"]', true);
     enable('[data-cmd="start_selection"]', true);
     enable('[data-cmd="plan_grasp"]', s === 'SELECTED');
@@ -991,6 +1053,17 @@
     });
   });
 
+  // 収穫位置の記録。すでに記録がある位置は、上書きしてよいか確かめる
+  $$('[data-set-basket]').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      const index = Number(btn.dataset.setBasket);
+      const rec = ((latest && latest.baskets) || {})[String(index)] || {};
+      const mark = '①②③'[index - 1];
+      if (rec.recorded && !window.confirm(`収穫位置${mark}を、いまの姿勢で上書きしますか？`)) return;
+      sendCommand({ cmd: 'set_basket', index });
+    });
+  });
+
   $$('[data-gripper]').forEach((btn) => {
     btn.addEventListener('click', () =>
       sendCommand({ cmd: 'gripper', close: btn.dataset.gripper === 'close' }));
@@ -1016,18 +1089,8 @@
         cmd: 'jog', joint: i,
         delta: Number(b.dataset.dir) * Number(el.jogStep.value),
       });
-      // 長押しで連続ジョグ
-      let timer = null;
-      const start = (ev) => {
-        ev.preventDefault();
-        send();
-        timer = setInterval(send, 120);
-      };
-      const stop = () => { if (timer) { clearInterval(timer); timer = null; } };
-      b.addEventListener('mousedown', start);
-      b.addEventListener('touchstart', start, { passive: false });
-      ['mouseup', 'mouseleave', 'touchend', 'touchcancel'].forEach((e) =>
-        b.addEventListener(e, stop));
+      // 長押しで連続ジョグ（internal のみ。lemon は 1 回押す = 1 ステップ）
+      holdRepeat(b, send, 120);
     });
     el.jogGrid.appendChild(wrap);
   }

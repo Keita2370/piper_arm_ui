@@ -138,14 +138,21 @@ check('「UI操作」は既定で OFF', st['enable_arm_command'] is False)
 check('横取りの警告を出さない（publisher が無いので比べるものが無い）',
       st['command_topic_taken'] is False)
 
-print('[アームが動くコマンドは受け付けない]')
-for name in ('goto_basket', 'jog', 'gripper', 'move_to_xyz', 'jog_xyz'):
+print('[元栓が OFF なら、アームが動くコマンドはどれも呼ばない]')
+MOVING = ('plan_grasp', 'grasp', 'home', 'release', 'goto_basket', 'jog',
+          'gripper', 'move_to_xyz', 'jog_xyz')
+for name in MOVING:
+    node._last_jog_at = None       # 続けざまの入力の歯止めとは別に、元栓だけを見る
     send({'cmd': name, 'index': 1, 'joint': 0, 'delta': 0.1, 'x': 0.2, 'y': 0, 'z': 0.3})
-check('どれも状態機械を動かさない', node.state == 'IDLE' and node.trajectory is None,
+check('どれも内部の状態機械を動かさない', node.state == 'IDLE' and node.trajectory is None,
       node.state)
 check('どれもサービスを呼ばない', not mini_ros.SERVICE_CALLS, mini_ros.SERVICE_CALLS)
-check('理由を画面のログに出す',
-      sum('lemon 構成では' in t for t in logs()) == 5, sum('lemon 構成では' in t for t in logs()))
+check('呼ばない理由を出す（記録の無い収穫位置は「記録されていません」）',
+      sum('OFF なので' in t or 'まだ記録されていません' in t for t in logs()) == len(MOVING),
+      sum('OFF なので' in t or 'まだ記録されていません' in t for t in logs()))
+send({'cmd': 'some_unknown_command'})
+check('知らないコマンドは理由を出して何もしない',
+      any('lemon 構成では「some_unknown_command」' in t for t in logs()))
 
 # --------------------------------------------------------------------- #
 print('[UI操作の元栓]')
@@ -461,6 +468,127 @@ send({'cmd': 'home'})
 got = wait_log('ホームへ戻す: unreachable', 3.0)
 check('停止していない失敗はそのまま失敗と出す',
       got is not None and '停止で止めました' not in got, got)
+
+# --------------------------------------------------------------------- #
+# 手動ジョグ・座標指定・グリッパ（lemon では MoveIt で動かす）
+# --------------------------------------------------------------------- #
+print('[手動ジョグ]')
+from piper_arm_ui.lemon_backend import ServiceCaller  # noqa: E402
+node = make(robot_description_file=os.path.join(HERE, 'test_arm.urdf'))
+mini_ros.Node.publisher_counts['/lemon_harvest_manager/status'] = 0
+node.tick(3)
+send({'cmd': 'set_enable', 'value': True})
+moves, grips = [], []
+node.callers['joint_move'] = ServiceCaller(node, None, '/fake/joint_move', None, 5.0)
+node.callers['gripper'] = ServiceCaller(node, None, '/fake/gripper', None, 5.0)
+mini_ros.SERVICES['/fake/joint_move'] = lambda q: (moves.append(list(q)), Resp(True, 'reached'))[1]
+mini_ros.SERVICES['/fake/gripper'] = lambda pos: (grips.append(pos), Resp(True, 'closed'))[1]
+mini_ros.SERVICES['/lemon_grasp/open'] = lambda _r: Resp(True, 'opened')
+
+
+def feedback(q):
+    js = mini_ros.JointState()
+    js.name = ['joint1', 'joint2', 'joint3', 'joint4', 'joint5', 'joint6', 'gripper']
+    js.position = list(q) + [0.03]
+    mini_ros.BUS.publish('/joint_states_single', js)
+
+
+node._last_jog_at = None
+send({'cmd': 'jog', 'joint': 1, 'delta': 0.04})
+check('実機の関節角が届いていなければ動かさない',
+      moves == [] and any('実機の関節角が届いていません' in t for t in logs()), moves)
+Q = [0.1, 0.8, -0.9, 0.0, 0.4, -0.2]
+feedback(Q)
+node._last_jog_at = None
+send({'cmd': 'jog', 'joint': 1, 'delta': 0.04})
+wait_log('関節ジョグ J2: reached')
+check('実機の関節角 ＋ delta を目標にする（指令値ではない）',
+      moves and abs(moves[-1][1] - 0.84) < 1e-9 and moves[-1][0] == 0.1, moves[-1:])
+st = state(node)
+check('関節の表には実機の関節角を出す', st['command_joints'] == [round(v, 4) for v in Q],
+      st['command_joints'])
+feedback([0.1, 3.14, -0.9, 0.0, 0.4, -0.2])
+n = len(moves)
+node._last_jog_at = None
+send({'cmd': 'jog', 'joint': 1, 'delta': 0.04})
+time.sleep(0.2)
+check('可動域の端からは動かさない', len(moves) == n and any('可動域の端' in t for t in logs()))
+
+print('[座標指定]')
+feedback(Q)
+here = node.chain.fk_position(Q)
+check('現在の手先は実機の関節角から出す',
+      state(node)['tcp'] == [round(float(v), 4) for v in here], state(node)['tcp'])
+node._last_jog_at = None
+send({'cmd': 'jog_xyz', 'axis': 2, 'delta': 0.01})
+wait_log('座標ジョグ (')
+q = moves[-1]
+reached = node.chain.fk_position(q)
+check('座標ジョグ: 手先が +Z に 1cm の関節角を目標にする',
+      abs(reached[2] - (here[2] + 0.01)) < 0.001 and abs(reached[0] - here[0]) < 0.001,
+      [round(float(v), 4) for v in reached])
+send({'cmd': 'move_to_xyz', 'x': float(here[0]) + 0.02, 'y': float(here[1]), 'z': float(here[2])})
+wait_log('座標指定 (')
+reached = node.chain.fk_position(moves[-1])
+check('座標指定: 指定した位置の関節角を目標にする', abs(reached[0] - (here[0] + 0.02)) < 0.001,
+      [round(float(v), 4) for v in reached])
+n = len(moves)
+send({'cmd': 'move_to_xyz', 'x': float(here[0]) + 0.5, 'y': float(here[1]), 'z': float(here[2])})
+send({'cmd': 'move_to_xyz', 'x': 'nan', 'y': 0, 'z': 0})
+time.sleep(0.2)
+check('1回の上限より遠い位置・数値でない位置へは動かさない', len(moves) == n, moves[n:])
+
+print('[グリッパ]')
+send({'cmd': 'gripper', 'close': True})
+wait_log('グリッパを閉じる: closed')
+check('閉: コントローラへ 0（閉じる）を送る', grips == [0.0], grips)
+send({'cmd': 'gripper', 'close': False})
+check('開: /lemon_grasp/open を呼ぶ', wait_log('グリッパを開く: opened') is not None)
+
+print('[ジョグ・座標指定にも元栓と排他が効く]')
+send({'cmd': 'set_enable', 'value': False})
+n = len(moves)
+node._last_jog_at = None
+send({'cmd': 'jog', 'joint': 0, 'delta': 0.04})
+node._last_jog_at = None
+send({'cmd': 'jog_xyz', 'axis': 0, 'delta': 0.01})
+time.sleep(0.2)
+check('元栓が OFF ならジョグも座標指定も動かさない', len(moves) == n)
+send({'cmd': 'set_enable', 'value': True})
+mini_ros.SERVICES['/fake/joint_move'] = lambda q: (time.sleep(0.8), moves.append(list(q)),
+                                                   Resp(True, 'reached'))[2]
+node._last_jog_at = None
+send({'cmd': 'jog', 'joint': 0, 'delta': 0.04})
+time.sleep(0.1)
+send({'cmd': 'home'})
+check('ジョグで動いている間はほかの動作を呼ばない',
+      wait_log('いま「joint_move」が動いている', 1.0) is not None)
+wait_log('関節ジョグ J1: reached', 3.0)
+
+print('[続けざまのジョグは無視する（長押しが止まらなくなった件の歯止め）]')
+mini_ros.SERVICES['/fake/joint_move'] = lambda q: (moves.append(list(q)), Resp(True, 'reached'))[1]
+time.sleep(0.6)
+n = len(moves)
+for _ in range(10):                    # 画面が 0.12 秒ごとに送り続けた状況
+    feedback(Q)
+    send({'cmd': 'jog', 'joint': 0, 'delta': 0.02})
+    time.sleep(0.12)
+time.sleep(0.2)
+check('0.12 秒ごとに 10 回来ても、動くのは最初の 1 回だけ', len(moves) - n == 1, len(moves) - n)
+check('無視したことを出す', any('続けざまの入力を無視しました' in t for t in logs()))
+time.sleep(0.6)
+feedback(Q)
+send({'cmd': 'jog', 'joint': 0, 'delta': 0.02})
+time.sleep(0.2)
+time.sleep(0.1)
+check('間を空ければ次の 1 回は動く', len(moves) - n == 2, len(moves) - n)
+n = len(moves)
+time.sleep(0.6)
+feedback(Q)
+send({'cmd': 'jog_xyz', 'axis': 2, 'delta': 0.005})
+send({'cmd': 'jog_xyz', 'axis': 2, 'delta': 0.005})
+time.sleep(0.3)
+check('座標ジョグも続けざまは 1 回だけ', len(moves) - n == 1, len(moves) - n)
 
 # --------------------------------------------------------------------- #
 print('[internal は従来どおり]')

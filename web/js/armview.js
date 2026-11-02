@@ -239,7 +239,8 @@ class RobotMap {
   /**
    * @param activeBasket 選択中の収穫位置 (1..3)
    * @param yaw          joint1 の角度（搭載アームの向き）
-   * @param baskets      収穫位置の実座標 [{x, y}, ...]（base_link 系 [m]）。
+   * @param baskets      収穫位置の実座標 [{x, y} または null, ...]（base_link 系 [m]）。
+   *                     null はまだ記録されていない位置で、描かない。
    *                     省略時は前回値を使う。
    */
   update(activeBasket, yaw, baskets) {
@@ -288,18 +289,22 @@ class RobotMap {
     // アーム本体の描画（上向き・-yaw 回転）と同じ向きになる。
     const armX = cx;
     const armY = cy - bodyH * 0.12;      // アームの取り付け位置＝原点
-    const marks = this.baskets || [];
+    // 番号は並びの位置で決まる（null＝未記録を飛ばしても ② は ② のまま）
+    const marks = (this.baskets || [])
+      .map((b, i) => (b ? { ...b, i } : null))
+      .filter((b) => b);
     const reach = Math.max(0.05, ...marks.map((b) => Math.hypot(b.x, b.y)));
     // いちばん遠い収穫位置がパネルに収まるように倍率を決める
     const scale = (Math.min(this.w, this.h) * 0.34) / reach;
 
-    const baskets = marks.map((b, i) => ({
-      n: ['①', '②', '③'][i] || String(i + 1),
+    const baskets = marks.map((b) => ({
+      n: ['①', '②', '③'][b.i] || String(b.i + 1),
+      i: b.i,
       x: armX - b.y * scale,
       y: armY - b.x * scale,
     }));
-    baskets.forEach((b, i) => {
-      const active = this.activeBasket === i + 1;
+    baskets.forEach((b) => {
+      const active = this.activeBasket === b.i + 1;
       ctx.beginPath();
       ctx.arc(b.x, b.y, 17, 0, Math.PI * 2);
       ctx.fillStyle = active ? c.target : 'rgba(120,140,160,0.18)';

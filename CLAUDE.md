@@ -110,12 +110,13 @@ python3 tests/test_cartesian.py    # 座標指定コマンドをシーケンサ�
 python3 tests/test_xyz_ui.py       # 座標指定トグルを Chromium で押す（22項目）
 python3 tests/test_command_topic_guard.py  # /joint_states の安全弁（22項目）
 python3 tests/test_team_status.py  # チームの収穫システムの状態表示（43項目）
-python3 tests/test_team_ui.py      # 状態表示・検出枠の印・lemon のボタンを Chromium で（57項目）
+python3 tests/test_team_ui.py      # 状態表示・検出枠の印・lemon のボタン・長押し・右下の図を Chromium で（88項目）
 python3 tests/test_video_relay.py  # 映像を溜めない・同じ絵を送らない・送る映像の選び方（17項目）
 python3 tests/test_video_ui.py     # ブラウザの映像要求・再接続・関節角の間引き（15項目）
 python3 tests/test_arm_status.py   # /arm_status の真偽値の読み方（6項目）
 python3 tests/test_lemon_detections.py  # 検出アダプタ: 楕円→枠、正規化、対象の印、TF は固定中だけ（29項目）
-python3 tests/test_lemon_backend.py     # backend:=lemon: サービス呼び出し・固まらない・停止・把持の決まり（72項目）
+python3 tests/test_lemon_backend.py     # backend:=lemon: サービス呼び出し・固まらない・停止・把持の決まり・ジョグ（89項目）
+python3 tests/test_baskets.py      # 収穫位置①②③: 記録のファイル・記録した位置へだけ動く（27項目）
 python3 tests/check_real_urdf.py   # 実機URDFでの運動学の成立確認
 ```
 
@@ -156,6 +157,7 @@ pip3 install numpy scipy aiohttp playwright && playwright install chromium
 | **IK が「到達可能なのに届かない」と言う** | 減衰（λ）を固定にすると局所解で止まり 2.5% 取りこぼす。1歩ごとに受け入れ判定して λ を調整する |
 | **IK の時間制限が解を削る** | 打ち切りを 0.12 秒にすると到達可能な目標の 4% を落とす。**`time_budget` は速度調整ではなく最悪時の保険**。短くしない |
 | **`/joint_states` の向きが構成で変わる** | 本家 piper_ros は「入力」、ros2_control 構成では「出力」。後者で publish すると MoveIt / Servo の現在姿勢が壊れる。v0.4.0 で安全弁を入れた（`_check_command_topic_owner`）。**外さないこと** |
+| **長押しのジョグが止まらず、アームが動き続ける** | 押している間にボタンを disabled にすると、ブラウザはそのボタンに mouseup を届けず、繰り返しのタイマーが止まらない（lemon で実機が動き続けた）。長押しは `holdRepeat()` を使う（どこで離しても止まる・押せなくなったら止まる・lemon は 1 回押す = 1 ステップ）。サーバ側も 0.5 s 以内の続けざまのジョグを無視する（`JOG_MIN_INTERVAL`） |
 | **ヘッダによる遠隔判定がすり抜ける** | Chromium は `extra_http_headers` を **WebSocket の upgrade に付けない**。`public_port` に届いたかを第一の判定にしている |
 
 ---

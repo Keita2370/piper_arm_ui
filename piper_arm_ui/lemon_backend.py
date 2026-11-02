@@ -84,6 +84,160 @@ class ServiceCaller:
         }
 
 
+class BasketMover(ServiceCaller):
+    """収穫位置（記録した関節角）へ MoveIt で動かす.
+
+    チームの moveit_helper と同じ形: /plan_kinematic_path で計画（最大 max_attempts 回）→
+    /execute_trajectory で実行。実行を /execute_trajectory にしてあるので、
+    「停止」（/execute_trajectory の全ゴールの取り消し）がそのまま効く。
+    call(joints, on_done) の joints は joint1..joint6 [rad]。
+    """
+
+    JOINTS = ['joint1', 'joint2', 'joint3', 'joint4', 'joint5', 'joint6']
+
+    def __init__(self, node, callback_group, timeout, group='arm', planning_time=5.0,
+                 attempts=10, max_attempts=3, velocity=0.2, acceleration=0.3,
+                 tolerance=0.01, name='収穫位置への移動'):
+        from moveit_msgs.srv import GetMotionPlan
+        from moveit_msgs.action import ExecuteTrajectory
+        from rclpy.action import ActionClient
+        self.name = name
+        self.timeout = float(timeout)
+        self.busy = False
+        self.started = None
+        self.last = None
+        self._lock = threading.Lock()
+        self.client = node.create_client(GetMotionPlan, '/plan_kinematic_path',
+                                         callback_group=callback_group)
+        self.execute = ActionClient(node, ExecuteTrajectory, '/execute_trajectory',
+                                    callback_group=callback_group)
+        self.GetMotionPlan = GetMotionPlan
+        self.ExecuteTrajectory = ExecuteTrajectory
+        # 速さはチームの実機の値（lemon_harvest.launch.py の REAL_MOVEIT_PARAMS）に合わせる
+        self.group, self.planning_time = group, planning_time
+        self.attempts, self.max_attempts = attempts, max_attempts
+        self.velocity, self.acceleration, self.tolerance = velocity, acceleration, tolerance
+
+    def _wait(self, future, timeout):
+        done = threading.Event()
+        future.add_done_callback(lambda _f: done.set())
+        return future.result() if done.wait(timeout) else None
+
+    def _run(self, joints, on_done):
+        success, message = False, ''
+        try:
+            success, message = self._move(joints)
+        except Exception as exc:  # noqa: BLE001
+            success, message = False, '収穫位置への移動で例外: %s' % exc
+        finally:
+            self.last = {'success': success, 'message': message, 't': time.monotonic()}
+            with self._lock:
+                self.busy = False
+        try:
+            on_done(success, message)
+        except Exception:  # noqa: BLE001
+            pass
+
+    def _move(self, joints):
+        from moveit_msgs.msg import Constraints, JointConstraint, MoveItErrorCodes
+        if not self.client.wait_for_service(timeout_sec=2.0):
+            return False, '/plan_kinematic_path が見つかりません（move_group が起動していない）'
+
+        req = self.GetMotionPlan.Request()
+        r = req.motion_plan_request
+        r.group_name = self.group
+        r.start_state.is_diff = True
+        c = Constraints()
+        for name, pos in zip(self.JOINTS, joints):
+            jc = JointConstraint()
+            jc.joint_name = name
+            jc.position = float(pos)
+            jc.tolerance_above = self.tolerance
+            jc.tolerance_below = self.tolerance
+            jc.weight = 1.0
+            c.joint_constraints.append(jc)
+        r.goal_constraints.append(c)
+        r.num_planning_attempts = self.attempts
+        r.allowed_planning_time = self.planning_time
+        r.max_velocity_scaling_factor = self.velocity
+        r.max_acceleration_scaling_factor = self.acceleration
+
+        trajectory, code = None, None
+        for _ in range(self.max_attempts):
+            res = self._wait(self.client.call_async(req), self.planning_time + 5.0)
+            if res is None:
+                code = 'timeout'
+                continue
+            code = res.motion_plan_response.error_code.val
+            if code == MoveItErrorCodes.SUCCESS:
+                trajectory = res.motion_plan_response.trajectory
+                break
+        if trajectory is None:
+            return False, 'unreachable after %d attempts (error_code=%s)' % (self.max_attempts, code)
+
+        if not self.execute.wait_for_server(timeout_sec=2.0):
+            return False, '/execute_trajectory が見つかりません'
+        goal = self.ExecuteTrajectory.Goal()
+        goal.trajectory = trajectory
+        handle = self._wait(self.execute.send_goal_async(goal), 5.0)
+        if handle is None or not handle.accepted:
+            return False, 'execution goal rejected'
+        result = self._wait(handle.get_result_async(), self.timeout)
+        if result is None:
+            return False, 'execution timed out'
+        code = result.result.error_code.val
+        if code != MoveItErrorCodes.SUCCESS:
+            return False, 'execution failed (error_code=%s)' % code
+        return True, 'reached'
+
+
+class GripperMover(BasketMover):
+    """グリッパを閉じる（lemon_grasp に閉じるサービスが無いので、コントローラへ直接）.
+
+    /gripper_controller/follow_joint_trajectory に joint7 の目標を送る。
+    開くほうは /lemon_grasp/open を使う（掴んだレモンを planning scene から外すため）。
+    call(position, on_done) の position は joint7 [m]（0 で閉じる）。
+    """
+
+    def __init__(self, node, callback_group, timeout, joint='joint7', duration=1.0):
+        from control_msgs.action import FollowJointTrajectory
+        from rclpy.action import ActionClient
+        self.name = 'グリッパ'
+        self.timeout = float(timeout)
+        self.busy = False
+        self.started = None
+        self.last = None
+        self._lock = threading.Lock()
+        self.FollowJointTrajectory = FollowJointTrajectory
+        self.action = ActionClient(node, FollowJointTrajectory,
+                                   '/gripper_controller/follow_joint_trajectory',
+                                   callback_group=callback_group)
+        self.joint, self.duration = joint, duration
+
+    def _move(self, position):
+        from builtin_interfaces.msg import Duration
+        from trajectory_msgs.msg import JointTrajectoryPoint
+        if not self.action.wait_for_server(timeout_sec=2.0):
+            return False, '/gripper_controller/follow_joint_trajectory が見つかりません'
+        goal = self.FollowJointTrajectory.Goal()
+        goal.trajectory.joint_names = [self.joint]
+        pt = JointTrajectoryPoint()
+        pt.positions = [float(position)]
+        pt.time_from_start = Duration(sec=int(self.duration),
+                                      nanosec=int((self.duration % 1) * 1e9))
+        goal.trajectory.points.append(pt)
+        handle = self._wait(self.action.send_goal_async(goal), 5.0)
+        if handle is None or not handle.accepted:
+            return False, 'gripper goal rejected'
+        result = self._wait(handle.get_result_async(), self.timeout)
+        if result is None:
+            return False, 'gripper timed out'
+        # レモンを挟むと閉じきらずに abort されることがある（lemon_grasp と同じ）。
+        # 動いたのは確かなので、結果の種類も含めてそのまま出す
+        code = result.result.error_code
+        return True, 'closed' if code == 0 else 'closed (error_code=%s)' % code
+
+
 def _parse_cancel(res):
     """action_msgs/CancelGoal の応答。空の要求＝全部のゴールを取り消す."""
     names = {0: 'ok', 1: 'rejected', 2: 'unknown goal', 3: 'goal terminated'}
@@ -101,12 +255,16 @@ TIMEOUTS = {
     'go_home': 90.0,        # MoveIt の計画（最大3回）＋実行
     'open': 20.0,           # グリッパの軌道＋待ち
     'approach': 120.0,      # 差し込める向きの探索＋MoveIt の計画（最大3回）＋実行
+    'basket': 90.0,         # 収穫位置への MoveIt の実行
+    'joint_move': 30.0,     # 関節ジョグ・座標指定（MoveIt の計画＋実行）
+    'gripper': 10.0,
+    'cancel_gripper': 5.0,
     'grasp': 120.0,         # 開く＋差し込み（servo_timeout 実機 40 s）＋閉じる＋戻り
     'stop': 5.0, 'cancel_execute': 5.0, 'cancel_arm': 5.0,
 }
 
 # アームやグリッパが動く呼び出し。同時に1つしか動かさない（harvest_sequencer が見る）
-MOTION = ('go_home', 'open', 'approach', 'grasp')
+MOTION = ('go_home', 'open', 'approach', 'grasp', 'basket', 'joint_move', 'gripper')
 
 
 def make_callers(node, callback_group, timeouts=None):
@@ -135,11 +293,24 @@ def make_callers(node, callback_group, timeouts=None):
         from action_msgs.srv import CancelGoal
         for key, name in (('cancel_execute', '/execute_trajectory/_action/cancel_goal'),
                           ('cancel_arm',
-                           '/arm_controller/follow_joint_trajectory/_action/cancel_goal')):
+                           '/arm_controller/follow_joint_trajectory/_action/cancel_goal'),
+                          ('cancel_gripper',
+                           '/gripper_controller/follow_joint_trajectory/_action/cancel_goal')):
             callers[key] = ServiceCaller(node, CancelGoal, name, callback_group, t[key],
                                          parse=_parse_cancel)
     except ImportError as exc:
         node.get_logger().warn('action_msgs が無いため、停止で軌道を取り消せません: %s' % exc)
+    try:
+        callers['basket'] = BasketMover(node, callback_group, t['basket'])
+        callers['joint_move'] = BasketMover(node, callback_group, t['joint_move'],
+                                            name='関節の移動')
+    except ImportError as exc:
+        node.get_logger().warn('moveit_msgs が無いため、収穫位置・ジョグ・座標指定は使えません: %s'
+                               % exc)
+    try:
+        callers['gripper'] = GripperMover(node, callback_group, t['gripper'])
+    except ImportError as exc:
+        node.get_logger().warn('control_msgs が無いため、グリッパを閉じられません: %s' % exc)
     try:
         from lemon_msgs.srv import SelectTarget
         callers['select'] = ServiceCaller(
