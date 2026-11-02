@@ -259,6 +259,12 @@ def generate_launch_description():
         executable='ui_server',
         name='ui_server',
         output='screen',
+        # 実機（ミニPC）で映像のエンコード中に SIGSEGV で落ちたことがある（原因は
+        # aiortc / PyAV の内部と思われ、未特定）。落ちると画面が止まったままになるので、
+        # 自動で起動し直す。ui_server はアームへの指令を出さないので、起動し直しても
+        # アームの動きには影響しない
+        respawn=True,
+        respawn_delay=2.0,
         parameters=[params_file, {
             'port': ParameterValue(LaunchConfiguration('port'), value_type=int),
             'rosbridge_port': ParameterValue(
@@ -267,6 +273,8 @@ def generate_launch_description():
             'arm_camera_topic': LaunchConfiguration('arm_camera_topic'),
             'front_camera_topic': LaunchConfiguration('front_camera_topic'),
             'camera_transport': LaunchConfiguration('camera_transport'),
+            # RViz の映像をブラウザへ送るか（送らないなら待機画面をエンコードしない）
+            'rviz_enabled': LaunchConfiguration('start_rviz_bridge'),
             # rviz_bridge と必ず同じ値にする。ずれると ui_server 側で
             # リサイズが入って画質と速度をどちらも損なう。
             'rviz_fps': ParameterValue(LaunchConfiguration('rviz_fps'), value_type=int),

@@ -230,14 +230,28 @@
   setInterval(pollControl, 3000);
 
   // ---------------------------------------------------------------- 映像
+  // サーバが「中身のある映像」だけを教えてくれる（video_cameras）。要求した映像は
+  // 中身が無くてもエンコードされ続け、ミニPCの CPU を食って YOLO を遅くするので、
+  // 一覧に無いものは要求しない。古いサーバ（一覧が無い）には従来どおり3本とも要求する。
+  const videoCameras = Array.isArray(serverInfo.video_cameras)
+    ? serverInfo.video_cameras : ['arm', 'front', 'rviz'];
+  const videoHints = { arm: el.hintArm, front: el.hintFront, rviz: el.hintRviz };
+  const noVideoText = {
+    front: 'フロントカメラは設定されていません（front_camera_topic）',
+    rviz: 'RViz 映像は起動していません（start_rviz_bridge:=true で有効）',
+  };
+  Object.entries(noVideoText).forEach(([cam, text]) => {
+    if (!videoCameras.includes(cam) && videoHints[cam]) videoHints[cam].textContent = text;
+  });
   const video = new WebRtcVideo(
-    ['arm', 'front', 'rviz'],
+    videoCameras,
     { arm: el.videoArm, front: el.videoFront, rviz: el.videoRviz },
     (state) => {
       const ok = state === 'connected';
       setPill(el.pillVideo, ok ? 'ok' : (state === 'connecting' ? 'warn' : 'bad'), '映像');
-      [el.hintArm, el.hintFront, el.hintRviz].forEach((h) => {
-        if (h) h.classList.toggle('is-hidden', ok);
+      // 要求していない映像の案内は出したままにする（理由を書いてある）
+      videoCameras.forEach((cam) => {
+        if (videoHints[cam]) videoHints[cam].classList.toggle('is-hidden', ok);
       });
     },
     serverInfo.ice_servers,
@@ -423,14 +437,17 @@
     return out;
   }
 
+  // 3D ビューの更新には毎秒20回で足りる。元は 100Hz / 48Hz を全部受け取っていて、
+  // その中継がミニPCの CPU を食っていた（YOLO が遅くなり対象が選ばれなくなった）
+  const JOINT_THROTTLE_MS = 50;
   ros.subscribe(TOPIC_JOINT_CMD, JOINT_STATE_TYPE, (msg) => {
     jointState.cmd = jointsFromMsg(msg);
     jointState.cmdAt = performance.now();
-  });
+  }, { throttleMs: JOINT_THROTTLE_MS });
   ros.subscribe(TOPIC_JOINT_FB, JOINT_STATE_TYPE, (msg) => {
     jointState.fb = jointsFromMsg(msg);
     jointState.fbAt = performance.now();
-  });
+  }, { throttleMs: JOINT_THROTTLE_MS });
 
   function pumpJoints() {
     if (robotView && robotReady) {

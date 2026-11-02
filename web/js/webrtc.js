@@ -16,6 +16,7 @@ class WebRtcVideo {
     this.mids = {};
     this.retryDelay = 2000;
     this.closed = false;
+    this.retryTimer = null;
   }
 
   async start() {
@@ -25,6 +26,10 @@ class WebRtcVideo {
 
   stop() {
     this.closed = true;
+    if (this.retryTimer) {
+      clearTimeout(this.retryTimer);
+      this.retryTimer = null;
+    }
     if (this.pc) {
       this.pc.close();
       this.pc = null;
@@ -32,9 +37,25 @@ class WebRtcVideo {
     this.onState('closed');
   }
 
+  // 再接続は必ずここを通す。以前は状態の変化ごと・失敗ごとに setTimeout していたので、
+  // 1回切れると再接続が何本も同時に走り、古い接続も閉じないまま積み重なった。
+  // サーバはその全部についてエンコードを続けるので、CPU を食い、落ちる原因にもなる。
+  _scheduleRetry() {
+    if (this.closed || this.retryTimer) return;
+    this.retryTimer = setTimeout(() => {
+      this.retryTimer = null;
+      this._connect();
+    }, this.retryDelay);
+  }
+
   async _connect() {
     if (this.closed) return;
     this.onState('connecting');
+    // 前の接続は必ず閉じる（閉じないとサーバ側でエンコードが続く）
+    if (this.pc) {
+      try { this.pc.close(); } catch (e) { /* 無視 */ }
+      this.pc = null;
+    }
     try {
       const pc = new RTCPeerConnection({ iceServers: this.iceServers });
       this.pc = pc;
@@ -43,10 +64,10 @@ class WebRtcVideo {
 
       pc.addEventListener('track', (event) => this._onTrack(event));
       pc.addEventListener('connectionstatechange', () => {
+        if (pc !== this.pc) return;          // 閉じた古い接続の知らせは無視
         this.onState(pc.connectionState);
-        if (['failed', 'disconnected', 'closed'].includes(pc.connectionState)
-            && !this.closed) {
-          setTimeout(() => this._connect(), this.retryDelay);
+        if (['failed', 'disconnected', 'closed'].includes(pc.connectionState)) {
+          this._scheduleRetry();
         }
       });
 
@@ -67,13 +88,14 @@ class WebRtcVideo {
       });
       if (!response.ok) throw new Error(`offer failed: ${response.status}`);
       const answer = await response.json();
+      if (pc !== this.pc) return;            // 待っている間に作り直された
       this.mids = answer.mids || {};
       await pc.setRemoteDescription(answer);
       this._flushPendingTracks();
     } catch (err) {
       console.error('WebRTC接続に失敗:', err);
       this.onState('failed');
-      if (!this.closed) setTimeout(() => this._connect(), this.retryDelay);
+      this._scheduleRetry();
     }
   }
 

@@ -44,7 +44,8 @@ class RosBridge {
       this.connected = true;
       this._reconnectDelay = 1000;
       // 再接続時に購読／広告を張り直す
-      this.subscribers.forEach((entry, topic) => this._sendSubscribe(topic, entry.type));
+      this.subscribers.forEach((entry, topic) => this._sendSubscribe(
+        topic, entry.type, entry.throttleMs));
       this.advertised.forEach((key) => {
         const [topic, type] = key.split('|');
         this._send({ op: 'advertise', topic, type });
@@ -89,16 +90,19 @@ class RosBridge {
     return false;
   }
 
-  _sendSubscribe(topic, type) {
-    this._send({ op: 'subscribe', topic, type, throttle_rate: 0, queue_length: 1 });
+  _sendSubscribe(topic, type, throttleMs = 0) {
+    this._send({ op: 'subscribe', topic, type, throttle_rate: throttleMs, queue_length: 1 });
   }
 
-  subscribe(topic, type, handler) {
+  // throttleMs: rosbridge 側で間引く間隔 [ms]。0 なら全部受け取る。
+  // 100Hz の /joint_states などを全部ブラウザへ流すと、rosbridge と ui_server の
+  // 中継がそれだけで CPU を食う（ミニPCでは YOLO と取り合いになる）
+  subscribe(topic, type, handler, { throttleMs = 0 } = {}) {
     let entry = this.subscribers.get(topic);
     if (!entry) {
-      entry = { type, handlers: [] };
+      entry = { type, handlers: [], throttleMs };
       this.subscribers.set(topic, entry);
-      this._sendSubscribe(topic, type);
+      this._sendSubscribe(topic, type, throttleMs);
     }
     entry.handlers.push(handler);
   }

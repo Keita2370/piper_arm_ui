@@ -233,7 +233,10 @@ async def rosbridge_proxy(request):
     gate = node.control_gate
     trusted = peer_is_trusted(request)
 
-    ws_client = web.WebSocketResponse(heartbeat=30)
+    # compress=False: 既定では 1通ごとに zlib で圧縮する。関節角だけで毎秒数十通あり、
+    # その圧縮がメインスレッド（映像の送出と同じ）の CPU を食う。中継先は同じPCの
+    # rosbridge で、ブラウザまでも LAN なので圧縮しても得るものが小さい
+    ws_client = web.WebSocketResponse(heartbeat=30, compress=False)
     await ws_client.prepare(request)
 
     who = request.headers.get('CF-Connecting-IP') or \
@@ -247,7 +250,7 @@ async def rosbridge_proxy(request):
     session = aiohttp.ClientSession()
     dropped = 0
     try:
-        async with session.ws_connect(url, heartbeat=30) as ws_up:
+        async with session.ws_connect(url, heartbeat=30, compress=0) as ws_up:
 
             async def client_to_ros():
                 nonlocal dropped

@@ -407,8 +407,11 @@ class HarvestSequencer(Node):
         """piper_msgs/PiperStatusMsg を UI 向けに整形する."""
         limits = [i + 1 for i in range(6)
                   if getattr(msg, 'joint_%d_angle_limit' % (i + 1), False)]
+        # communication_status_joint_N は「通信が異常か」で、True が異常
+        # （piper_sdk の定義「True为通信异常」）。名前から「正常なら True」と読むと
+        # 逆になり、正常なのに全関節を異常と表示していた（実機で確認）
         comm_ng = [i + 1 for i in range(6)
-                   if not getattr(msg, 'communication_status_joint_%d' % (i + 1), True)]
+                   if getattr(msg, 'communication_status_joint_%d' % (i + 1), False)]
         self.arm_status = {
             'ctrl_mode': int(getattr(msg, 'ctrl_mode', 0)),
             'arm_status': int(getattr(msg, 'arm_status', 0)),

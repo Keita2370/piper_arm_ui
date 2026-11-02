@@ -183,10 +183,24 @@ class DummyVideoTrack(_BaseTrack):
 class RosImageTrack(_BaseTrack):
     """sensor_msgs/Image の最新フレームを WebRTC で流す.
 
-    ノード側が set_frame() で最新画像を書き込み、こちらは fps 間隔で読み出す。
-    画像が来ていない間は「待機中」を示す暗いフレームを返すので、
+    ノード側が set_frame() で最新画像を書き込み、こちらは**新しい絵が来たときだけ**
+    送る（ただし fps より速くはしない）。絵が来ない間も KEEPALIVE_SEC ごとに
+    1枚送り、来ていなければ「待機中」の暗いフレームにするので、
     カメラが落ちても WebRTC 接続自体は維持される。
+
+    【なぜ新しい絵を待つのか】
+    以前は fps（15）間隔で、絵が変わっていなくても毎回エンコードしていた。
+    実機の手首カメラは CPU が混むと 3〜6fps しか出ず、エンコードの半分以上が
+    同じ絵の繰り返しだった。VP8 のエンコードはミニPCで重く、同居する YOLO を
+    遅くする。
     """
+
+    # 絵が来ないときに送り直す間隔 [s]。0 にすると接続が無音になり、
+    # ブラウザが「映像が止まった」と判断しやすくなる
+    KEEPALIVE_SEC = 1.0
+    # 新しい絵が来たかを見る間隔 [s]。set_frame は ROS のスレッドから
+    # 呼ばれるので asyncio.Event は使えず、短い間隔で見に行く
+    POLL_SEC = 0.01
 
     def __init__(self, width=640, height=480, fps=15, label='CAMERA'):
         super().__init__(fps)
@@ -195,10 +209,38 @@ class RosImageTrack(_BaseTrack):
         self.label = label
         self._frame = None
         self._frame_stamp = 0.0
+        self._frame_seq = 0        # set_frame のたびに増える
+        self._sent_seq = 0         # 最後に送った絵の番号
+        self._sent_at = 0.0
 
     def set_frame(self, bgr):
         self._frame = bgr
         self._frame_stamp = time.time()
+        self._frame_seq += 1
+
+    async def _wait_new_frame(self):
+        """新しい絵を待つ。fps より速くは返さない。KEEPALIVE_SEC で諦めて返す."""
+        min_gap = 1.0 / self.fps
+        while True:
+            now = time.time()
+            since = now - self._sent_at
+            if since < min_gap:
+                await asyncio.sleep(min_gap - since)
+                continue
+            if self._frame_seq != self._sent_seq or since >= self.KEEPALIVE_SEC:
+                break
+            await asyncio.sleep(self.POLL_SEC)
+        self._sent_seq = self._frame_seq
+        self._sent_at = time.time()
+
+    def _wallclock_timestamp(self):
+        # 送る間隔が一定でないので、枚数からではなく実時間から pts を作る
+        # （枚数から作ると、受け側で再生速度が狂う）
+        now = time.time()
+        if self._start is None:
+            self._start = now
+        self._count += 1
+        return int((now - self._start) * VIDEO_CLOCK_RATE), VIDEO_TIME_BASE
 
     @property
     def has_recent_frame(self):
@@ -213,7 +255,8 @@ class RosImageTrack(_BaseTrack):
         return img
 
     async def recv(self):
-        pts, time_base = await self._next_timestamp()
+        await self._wait_new_frame()
+        pts, time_base = self._wallclock_timestamp()
         img = self._frame if self.has_recent_frame else self._placeholder()
         if img.shape[0] != self.height or img.shape[1] != self.width:
             if CV2_AVAILABLE:

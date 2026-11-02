@@ -146,6 +146,9 @@ class UiServer(Node):
         self.declare_parameter('video_fps', 15)
         # RViz 画面（rviz_bridge が publish）
         self.declare_parameter('rviz_image_topic', TOPIC_RVIZ_IMAGE)
+        # rviz_bridge を同じ launch で起動したか。false なら RViz の映像は
+        # ブラウザに送らない（待機画面を 960x540 で延々エンコードしないため）
+        self.declare_parameter('rviz_enabled', False)
         # rviz_bridge の既定（960x540 @20fps）に合わせる。
         # 1280x720 は VP8 エンコードが 1 枚 30ms かかり 30fps 台で頭打ちになるため、
         # 解像度を落として fps を稼ぐほうがなめらかに見える。
@@ -196,6 +199,7 @@ class UiServer(Node):
             'front': p('front_camera_topic').value,
             'rviz': p('rviz_image_topic').value,
         }
+        self.rviz_enabled = bool(p('rviz_enabled').value)
 
         self.public_port = int(p('public_port').value or 0)
         trusted = _split_list(p('trusted_networks').value) or DEFAULT_TRUSTED_NETWORKS
@@ -364,15 +368,50 @@ class UiServer(Node):
         except Exception as exc:  # noqa: BLE001
             self.get_logger().warn('画像変換に失敗: %s' % exc, throttle_duration_sec=5.0)
 
+    def video_cameras(self):
+        """ブラウザに送る映像の一覧.
+
+        要求された映像は中身が無くても（テストパターン・待機画面でも）
+        毎フレームエンコードされる。ミニPC（N95）では映像3本のエンコードで
+        ui_server が CPU を 50〜80% 使い、同居している YOLO の検出が
+        lemon_target の要求（3秒に10枚）を割って対象が選ばれなくなった。
+        中身のある映像だけを送る。
+
+        - arm: 常に送る（本物のカメラ、または開発用のテストパターン）
+        - front: トピックがあるとき。開発用（use_dummy_video）は見た目の確認用に送る
+        - rviz: rviz_bridge を起動したとき。別に起動した rviz_bridge でも、
+          画像の publisher が居れば送る
+        """
+        cams = ['arm']
+        if self.use_dummy or self.camera_topics.get('front'):
+            cams.append('front')
+        rviz_topic = self.camera_topics.get('rviz')
+        rviz_live = False
+        if rviz_topic:
+            try:
+                rviz_live = self.count_publishers(rviz_topic) > 0
+            except Exception:  # noqa: BLE001
+                rviz_live = False
+        if self.rviz_enabled or rviz_live:
+            cams.append('rviz')
+        return cams
+
     def make_track(self, camera):
         """カメラ名から映像トラックを作る.
 
         ROS 由来のトラックは MediaRelay 経由で配る。こうしないと
         タブレットとPCなど複数ブラウザが繋がったときにフレームを奪い合う。
+
+        buffered=False は必須。既定の buffered=True は送り手と受け手の間に
+        上限の無いキューを挟むので、エンコードが fps に追いつかないと
+        フレーム（640x480 で 0.9MB）が溜まり続ける。実機（N95、YOLO と同居）で
+        毎秒 20〜28MB 増え、5分で 6GB に達した。映像も溜まった分だけ遅れていく。
+        buffered=False なら受け手は常に最新の1枚だけを取り、間は捨てる。
+        tests/test_video_relay.py が守っている。
         """
         track = self.ros_tracks.get(camera)
         if track is not None:
-            return self.relay.subscribe(track) if self.relay else track
+            return self.relay.subscribe(track, buffered=False) if self.relay else track
         labels = {'arm': 'ARM CAM', 'front': 'FRONT CAM', 'rviz': 'RVIZ (未起動)'}
         return DummyVideoTrack(
             self.width, self.height, self.fps,
@@ -401,6 +440,8 @@ async def _info(request):
         'camera_topics': node.camera_topics,
         'camera_transport': node.camera_transport,
         'live_sources': sorted(node.ros_tracks.keys()),
+        # ブラウザはこの映像だけを要求する（使わない映像をエンコードしない）
+        'video_cameras': node.video_cameras(),
         'video': {'width': node.width, 'height': node.height, 'fps': node.fps},
         'rosbridge_port': node.rosbridge_port,
         # ブラウザはここへ繋ぐ。ui_server と同じポートなので、
