@@ -14,7 +14,7 @@
 colcon build --packages-select piper_arm_ui --symlink-install
 source install/setup.bash
 
-python3 src/piper_arm_ui/tests/check_real_urdf.py
+python3 tests/check_real_urdf.py      # パッケージの中から
 ```
 
 **この UI の運動学は、本物の `piper_description.urdf` で動かした実績が無い。**
@@ -27,21 +27,30 @@ python3 src/piper_arm_ui/tests/check_real_urdf.py
 
 ---
 
-## 1. この環境について
+## 1. 環境について
 
-**実機（PiPER）は繋がっていない開発用PC。** CAN も RealSense も無い前提で動かす。
+**このファイルは UI パッケージ自体の説明。
+どのPCで動かしているか・何に繋ぐかは、ワークスペース直下の `CLAUDE.md` を見る。**
+
+実機が繋がっている環境では、そちらに安全上の約束が書いてある。**先にそれを読む。**
+
+### 実機なしで動かす（開発用PCの場合）
 
 ```bash
-# 実機なしで UI を一通り動かす（これが基本形）
 ros2 launch piper_arm_ui arm_ui.launch.py \
     use_dummy_video:=true enable_arm_command:=true
 # → ブラウザで http://localhost:8080/
 ```
 
-カメラはテストパターン、レモンの検出はダミー（`dummy_perception.py`）、
+カメラはテストパターン、検出はダミー（`dummy_perception.py`）、
 アームは指令した関節角がそのまま 3D ビューに反映される。
-**実機が要る作業（tcp_offset の校正、かご位置の実測合わせ）はここではできない。**
-やろうとしたら、そう言って止まること。
+
+> **`enable_arm_command:=true` は、実機が ros2_control 構成で動いている環境では
+> 付けてはいけない。** `/joint_states` の向きが逆になり、現在姿勢が壊れる。
+> 安全弁が自動で止めるが、そもそも付けないこと（ワークスペースの CLAUDE.md §4）。
+
+**実機が要る作業（tcp_offset の校正、かご位置の実測合わせ）は、
+実機が無い環境ではできない。** やろうとしたら、そう言って止まること。
 
 ---
 
@@ -56,6 +65,7 @@ ros2 launch piper_arm_ui arm_ui.launch.py \
 | **ゲームパッドと共存する** | `joy_to_piper_jointstates` と同じ `/joint_states` に出す。両方が publish すると**アームが暴れる**ので `enable_arm_command` は既定 false |
 | **rosbridge は外に開かない** | ブラウザは `ui_server` の `/rosbridge` 経由。rosbridge 自体は `127.0.0.1`。ここを開けると権限判定を素通りされる（`remote_access.py`） |
 | **コメントは日本語** | 既存コードに合わせる。「何をしているか」より**「なぜそうしたか」**を書く |
+| **他のワークスペースは読むだけ** | `~/piper_ros` と `~/lemon_ws` はミニPCで動いている実体。読む・ビルドするのはよいが**編集しない**。直してもミニPCには反映されず、両機で定義がずれて通信が壊れる |
 
 ---
 
@@ -83,6 +93,9 @@ piper_arm_ui/
 ├─ launch/arm_ui.launch.py  # 起動一式
 ├─ config/arm_ui.yaml       # 全ノードのパラメータ
 └─ tests/                   # ROS 無しで走る（下記）
+   ├─ mini_ros.py           # rclpy を差し替えるスタブ
+   ├─ test_arm.urdf         # piper_description が無い環境でも運動学を試す用
+   └─ check_real_urdf.py    # 実機URDFでの確認
 ```
 
 まず読む 3 つ: `common.py` → `harvest_sequencer.py` → `web/js/app.js`
@@ -92,9 +105,10 @@ piper_arm_ui/
 ## 4. テスト — 変更したら必ず走らせる
 
 ```bash
-python3 tests/test_kinematics.py   # 順運動学・逆運動学の数値検証（26項目）
+python3 tests/test_kinematics.py   # 順運動学・逆運動学の数値検証（25項目）
 python3 tests/test_cartesian.py    # 座標指定コマンドをシーケンサに流す（41項目）
 python3 tests/test_xyz_ui.py       # 座標指定トグルを Chromium で押す（22項目）
+python3 tests/test_command_topic_guard.py  # /joint_states の安全弁（22項目）
 python3 tests/check_real_urdf.py   # 実機URDFでの運動学の成立確認
 ```
 
@@ -134,6 +148,7 @@ pip3 install numpy scipy aiohttp playwright && playwright install chromium
 | **空欄の座標が 0 として送られる** | `Number('')` は `NaN` ではなく **`0`**。文字列として空かを先に見る |
 | **IK が「到達可能なのに届かない」と言う** | 減衰（λ）を固定にすると局所解で止まり 2.5% 取りこぼす。1歩ごとに受け入れ判定して λ を調整する |
 | **IK の時間制限が解を削る** | 打ち切りを 0.12 秒にすると到達可能な目標の 4% を落とす。**`time_budget` は速度調整ではなく最悪時の保険**。短くしない |
+| **`/joint_states` の向きが構成で変わる** | 本家 piper_ros は「入力」、ros2_control 構成では「出力」。後者で publish すると MoveIt / Servo の現在姿勢が壊れる。v0.4.0 で安全弁を入れた（`_check_command_topic_owner`）。**外さないこと** |
 | **ヘッダによる遠隔判定がすり抜ける** | Chromium は `extra_http_headers` を **WebSocket の upgrade に付けない**。`public_port` に届いたかを第一の判定にしている |
 
 ---

@@ -405,7 +405,7 @@ publish するだけの骨組み。走行系のインタフェースが決まっ
 | `test_compressed.py` | 分散構成の圧縮画像 |
 | `test_remote_access.py` | **遠隔からの操作が本当に ROS に届かないか**（29項目） |
 | `test_remote_browser.py` | 公開用ポートを本物の Chromium で開き、閲覧のみ→許可→取り消しを通す |
-| `test_kinematics.py` | **FK/IK の数値検証**（26項目）。scipy と照合、ヤコビアン vs 数値微分、IK の往復 |
+| `test_kinematics.py` | **FK/IK の数値検証**（25項目）。scipy と照合、ヤコビアン vs 数値微分、IK の往復 |
 | `test_cartesian.py` | 座標指定コマンドをシーケンサに流して確かめる（41項目） |
 | `test_xyz_ui.py` | 座標指定トグルを Chromium で押す（22項目） |
 

@@ -3,7 +3,7 @@
 ROS も実機も無しで走る。`piper_arm_ui/` の中から:
 
 ```bash
-python3 tests/test_kinematics.py   # 順運動学・逆運動学の数値検証（26項目）
+python3 tests/test_kinematics.py   # 順運動学・逆運動学の数値検証（25項目）
 python3 tests/test_cartesian.py    # 座標指定コマンドをシーケンサに流す（41項目）
 python3 tests/test_xyz_ui.py       # 座標指定トグルを Chromium で押す（22項目）
 python3 tests/check_real_urdf.py   # 実機URDFで運動学が成立するか（初回に1回）

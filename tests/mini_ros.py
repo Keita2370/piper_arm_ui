@@ -70,6 +70,7 @@ BUS = Bus()
 class _Publisher:
     def __init__(self, topic):
         self.topic = topic
+        self.topic_name = topic
 
     def publish(self, msg):
         BUS.publish(self.topic, msg)
@@ -116,8 +117,11 @@ class Node:
         self.timers.append(t)
         return t
 
-    def count_publishers(self, _topic):
-        return 1
+    # テストから上書きできるようにしておく {topic: 個数}
+    publisher_counts = {}
+
+    def count_publishers(self, topic):
+        return self.publisher_counts.get(topic, 1)
 
     def get_logger(self):
         return self._logger
@@ -163,6 +167,12 @@ class JointState(_Msg):
         self.effort = []
 
 
+class PointStamped(_Msg):
+    def __init__(self, frame_id='', x=0.0, y=0.0, z=0.0):
+        self.header = types.SimpleNamespace(stamp=None, frame_id=frame_id)
+        self.point = types.SimpleNamespace(x=x, y=y, z=z)
+
+
 def install():
     """rclpy とメッセージ型をスタブに差し替える."""
     rclpy = types.ModuleType('rclpy')
@@ -203,6 +213,7 @@ def install():
     geometry = types.ModuleType('geometry_msgs')
     geometry_msg = types.ModuleType('geometry_msgs.msg')
     geometry_msg.Pose = _Msg
+    geometry_msg.PointStamped = PointStamped
     geometry.msg = geometry_msg
 
     for name, mod in (

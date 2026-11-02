@@ -601,6 +601,19 @@
 
     setPill(el.pillArm, state.arm_connected ? 'ok' : 'warn', 'アーム');
     el.chkEnable.checked = !!state.enable_arm_command;
+    // 指令トピックを他のノードが握っているとき（ros2_control 構成）は
+    // UI からアームを動かせない。押せるままだと原因が分からないので伏せる。
+    if (state.command_topic_taken) {
+      el.chkEnable.disabled = true;
+      el.chkEnable.parentElement.title =
+        `${state.joint_command_topic} を他のノードが publish しているため、`
+        + 'UI からは動かせません（監視のみ）';
+      el.chkEnable.parentElement.classList.add('is-blocked');
+    } else if (el.chkEnable.disabled) {
+      el.chkEnable.disabled = false;
+      el.chkEnable.parentElement.title = '';
+      el.chkEnable.parentElement.classList.remove('is-blocked');
+    }
 
     // ステップ表示
     const step = STEP_ORDER[state.state] ?? 0;
@@ -624,6 +637,7 @@
     el.tagCount.textContent = `収穫 ${state.harvest_count || 0} 個`;
 
     renderXyz(state);
+    renderTeam(state.team);
 
     // 収穫位置ボタンの選択表示
     $$('[data-cmd="goto_basket"]').forEach((b) => {
@@ -736,6 +750,44 @@
     }
     el.readout.innerHTML = rows.map(([k, v, cls]) =>
       `<div><dt>${k}</dt><dd class="${cls}">${v}</dd></div>`).join('');
+  }
+
+  // チームの収穫システムの状態（段階1：表示だけ）。
+  // 相手の文字列がそのまま来るので innerHTML ではなく textContent で入れる
+  function renderTeam(team) {
+    const fmtAge = (age) => (age === null || age === undefined ? '' : `（${age.toFixed(1)} 秒前）`);
+    const put = (key, text, kind) => {
+      const dd = document.querySelector(`#team-status [data-team="${key}"] dd`);
+      if (!dd) return;
+      dd.textContent = text;
+      dd.className = kind ? `k-${kind}` : '';
+    };
+    if (!team) {
+      ['target', 'manager', 'approach', 'grasp'].forEach((k) => put(k, '—', 'absent'));
+      return;
+    }
+
+    const tg = team.target || {};
+    if (tg.locked) {
+      put('target', `固定 ${tg.point.map((v) => v.toFixed(3)).join(', ')} (${tg.frame_id})`, 'ok');
+    } else if (tg.present === false) {
+      put('target', 'lemon_target が起動していません', 'absent');
+    } else {
+      put('target', tg.seen ? '対象なし（解除済み）' : '対象なし', 'idle');
+    }
+
+    ['manager', 'approach', 'grasp'].forEach((k) => {
+      const st = team[k] || {};
+      if (st.present === false && !st.text) {
+        // manager は auto_run:=false では起動しない。異常ではない
+        put(k, k === 'manager' ? '起動していません（auto_run:=false）' : '起動していません',
+          'absent');
+      } else if (!st.text) {
+        put(k, 'まだ何も来ていません', 'idle');
+      } else {
+        put(k, `${st.label}${fmtAge(st.age)}`, st.kind);
+      }
+    });
   }
 
   function updateButtons(state) {
@@ -925,9 +977,17 @@
   });
 
   // ---------------------------------------------------------------- ログ
+  // チームのノードの文字列（失敗理由など）もそのまま流れてくるので、HTML として解釈させない
+  // function 宣言にしてあるのは巻き上げのため（const だと宣言より前の pushLog で TDZ）
+  function escapeHtml(t) {
+    return String(t).replace(/[&<>"']/g, (c) => ({
+      '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;',
+    }[c]));
+  }
+
   function pushLog(text, level = 'info') {
     const time = new Date().toLocaleTimeString('ja-JP', { hour12: false });
-    logs.unshift({ text, level, time });
+    logs.unshift({ text: escapeHtml(text), level, time });
     if (logs.length > 8) logs.pop();
     el.logList.innerHTML = logs
       .map((l) => `<li class="lv-${l.level}">${l.time} ${l.text}</li>`).join('');

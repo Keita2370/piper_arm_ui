@@ -96,29 +96,14 @@ pip3 install mss python-xlib
 > - `python-xlib` が無い場合は `xdotool` があればそちらで操作を注入する。
 >   どちらも無いと RViz は「表示のみ」になる。
 
-### 取得とビルド
-
-このリポジトリは **piper_arm_ui パッケージ単体**。AgileX の
-[piper_ros](https://github.com/agilexrobotics/piper_ros)（`humble` ブランチ）の
-ワークスペースの `src/` に置いて使う。
+### ビルド
 
 ```bash
-# piper_ros がまだ無ければ（AgileX 本家）
-git clone -b humble https://github.com/agilexrobotics/piper_ros.git ~/piper_ros
-
 cd ~/piper_ros            # 既存のワークスペース
-git clone https://github.com/Keita2370/piper_arm_ui.git src/piper_arm_ui
+cp -r /path/to/piper_arm_ui src/
 colcon build --packages-select piper_arm_ui --symlink-install
 source install/setup.bash
 ```
-
-> - **`piper_description` は piper_ros 側から使う**（このリポジトリには入っていない）。
->   3D ビューと座標指定の運動学はその URDF を読む。無いと座標指定が無効になる。
->   piper_ros をビルドして `source install/setup.bash` した状態で起動すること。
-> - piper_ros 自体も git リポジトリなので、`src/piper_arm_ui` が未追跡として
->   見える。気になるなら `echo 'src/piper_arm_ui/' >> ~/piper_ros/.git/info/exclude`。
-> - 入れたら最初に 1 回 `python3 src/piper_arm_ui/tests/check_real_urdf.py` で、
->   手元の URDF で運動学が成り立つかを確かめる（[tests/README.md](tests/README.md)）。
 
 ---
 

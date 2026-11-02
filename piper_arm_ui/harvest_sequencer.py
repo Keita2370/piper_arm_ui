@@ -22,8 +22,9 @@ import time
 
 import rclpy
 from rclpy.node import Node
-from rclpy.qos import QoSProfile, ReliabilityPolicy, HistoryPolicy
+from rclpy.qos import DurabilityPolicy, HistoryPolicy, QoSProfile, ReliabilityPolicy
 
+from geometry_msgs.msg import PointStamped
 from sensor_msgs.msg import JointState
 from std_msgs.msg import String
 
@@ -46,12 +47,17 @@ from piper_arm_ui.common import (
     STATE_SELECTED,
     STATE_SELECTING,
     TOPIC_DETECTIONS,
+    TOPIC_TEAM_APPROACH_STATUS,
+    TOPIC_TEAM_GRASP_STATUS,
+    TOPIC_TEAM_MANAGER_STATUS,
+    TOPIC_TEAM_TARGET,
     TOPIC_UI_COMMAND,
     TOPIC_UI_LOG,
     TOPIC_UI_STATE,
     clamp_pose,
 )
 from piper_arm_ui.kinematics import ArmChain, ChainError, find_description_file
+from piper_arm_ui.team_status import TeamStatus
 
 
 class Trajectory:
@@ -123,6 +129,13 @@ class HarvestSequencer(Node):
         # 入力ミス（単位を mm で入れた等）で大きく飛ぶのを防ぐ。
         self.declare_parameter('max_cartesian_step', 0.25)
 
+        # --- チームの収穫システム（段階1：購読して表示するだけ）---
+        # ここで購読するだけでは相手のノードに何も起きない。サービスは呼ばない
+        self.declare_parameter('team_manager_status_topic', TOPIC_TEAM_MANAGER_STATUS)
+        self.declare_parameter('team_approach_status_topic', TOPIC_TEAM_APPROACH_STATUS)
+        self.declare_parameter('team_grasp_status_topic', TOPIC_TEAM_GRASP_STATUS)
+        self.declare_parameter('team_target_topic', TOPIC_TEAM_TARGET)
+
         p = self.get_parameter
         self.enable_arm_command = bool(p('enable_arm_command').value)
         self.step_duration = float(p('stub_step_duration').value)
@@ -162,6 +175,10 @@ class HarvestSequencer(Node):
         self.basket_index = None
         self.harvest_count = 0
         self.grasp_plan = None
+        # 指令トピックを他のノードが握っている（= ros2_control 構成）。
+        # このときは UI から関節指令を出さない
+        self._command_topic_taken = False
+        self.team = TeamStatus()
 
         qos = QoSProfile(depth=10,
                          reliability=ReliabilityPolicy.RELIABLE,
@@ -180,6 +197,7 @@ class HarvestSequencer(Node):
             JointState, p('joint_feedback_topic').value, self._on_joint_feedback, 10)
         self._subscribe_optional_piper_topics(
             p('arm_status_topic').value, p('end_pose_topic').value)
+        self._subscribe_team_topics(qos)
 
         # --- timer ---
         self.create_timer(0.02, self._control_loop)          # 50 Hz: 軌道生成 + 指令
@@ -190,6 +208,9 @@ class HarvestSequencer(Node):
         self._instance_id = '%s#%d' % (self.get_name(), os.getpid())
         # 起動直後は相手を見つけられないので、少し待ってから1回だけ確かめる
         self._dup_timer = self.create_timer(5.0, self._check_duplicates)
+        # 相手のノードが居るかを数える。manager は auto_run:=false では居ないのが
+        # 正しいので、「何も来ない」と「居ない」を画面で区別できるようにする
+        self.create_timer(1.0, self._check_team_presence)
 
         self.get_logger().info(
             'harvest_sequencer started (enable_arm_command=%s)' % self.enable_arm_command)
@@ -268,6 +289,55 @@ class HarvestSequencer(Node):
                 '    pkill -f harvest_sequencer   （そのあと launch し直す）')
             self._log(msg, 'error')
 
+        self._check_command_topic_owner()
+
+    def _check_command_topic_owner(self):
+        """指令トピックを他の誰かが publish していないか確かめる.
+
+        【なぜこの確認が要るか】
+        本家 piper_ros では、start_single_piper.launch.py が
+        joint_ctrl_single → /joint_states にリマップしているので、
+        /joint_states に publish すればアームが動いた。
+
+        ros2_control を使う構成（topic_based_ros2_control + arm_controller）では
+        **向きが逆**で、/joint_states は joint_state_broadcaster の「出力」になる。
+        そこへこのノードが publish すると:
+
+          - アームは動かない（指令はもう別の経路）
+          - robot_state_publisher / MoveIt / Servo が読む「現在の関節角」に
+            指令値が混ざる。TF が実機と指令の間で揺れ、**Servo が誤った
+            現在姿勢を元に動く**ので危険
+
+        この取り違えは画面を見ても分からないので、他に publisher がいたら
+        指令を止めて理由を出す。判断に迷うときは止める側に倒す。
+        """
+        topic = self.joint_pub.topic_name
+        try:
+            count = self.count_publishers(topic)
+        except Exception:  # noqa: BLE001
+            return
+        # 自分を除いて誰かいるか
+        if count <= 1:
+            return
+
+        self._command_topic_taken = True
+        was_enabled = self.enable_arm_command
+        self.enable_arm_command = False
+
+        msg = ('%s を他のノードも publish しています（publisher %d 個）。'
+               'UI からの関節指令を停止しました' % (topic, count))
+        self.get_logger().error(
+            msg + '\n'
+            '    ros2_control を使う構成では /joint_states は「出力」です。\n'
+            '    UI が publish すると、アームは動かないうえに\n'
+            '    MoveIt / Servo が読む現在姿勢が壊れます。\n'
+            '    確認: ros2 topic info %s --verbose\n'
+            '    指令の送り先を joint_command_topic で変えるか、\n'
+            '    UI を監視のみで使ってください。' % topic)
+        self._log(msg, 'error')
+        if was_enabled:
+            self._log('安全のため「UI操作」を無効にしました', 'warn')
+
     # ------------------------------------------------------------------ #
     # piper_msgs は環境によっては未ビルドなので、失敗しても落とさない
     # ------------------------------------------------------------------ #
@@ -284,6 +354,39 @@ class HarvestSequencer(Node):
             self.create_subscription(Pose, end_pose_topic, self._on_end_pose, 10)
         except Exception as exc:  # noqa: BLE001
             self.get_logger().warn('end_pose の購読をスキップ (%s)' % exc)
+
+    def _subscribe_team_topics(self, qos):
+        """チームの収穫システムの status と対象を購読する."""
+        p = self.get_parameter
+        self._team_topics = {
+            'manager': str(p('team_manager_status_topic').value),
+            'approach': str(p('team_approach_status_topic').value),
+            'grasp': str(p('team_grasp_status_topic').value),
+        }
+        self._team_target_topic = str(p('team_target_topic').value)
+        for source, topic in self._team_topics.items():
+            self.create_subscription(
+                String, topic,
+                lambda msg, s=source: self._on_team_status(s, msg), qos)
+        # 相手は TRANSIENT_LOCAL で出している。VOLATILE で購読すると
+        # 起動前に固定された対象が届かない
+        latched = QoSProfile(depth=1,
+                             reliability=ReliabilityPolicy.RELIABLE,
+                             durability=DurabilityPolicy.TRANSIENT_LOCAL,
+                             history=HistoryPolicy.KEEP_LAST)
+        self.create_subscription(
+            PointStamped, self._team_target_topic, self._on_team_target, latched)
+
+    def _check_team_presence(self):
+        for source, topic in self._team_topics.items():
+            try:
+                self.team.present[source] = self.count_publishers(topic) > 0
+            except Exception:  # noqa: BLE001
+                self.team.present[source] = None
+        try:
+            self.team.present_target = self.count_publishers(self._team_target_topic) > 0
+        except Exception:  # noqa: BLE001
+            self.team.present_target = None
 
     # ------------------------------------------------------------------ #
     # コールバック
@@ -324,6 +427,25 @@ class HarvestSequencer(Node):
             'z': round(msg.position.z, 4),
         }
 
+    def _on_team_status(self, source, msg):
+        changed = self.team.on_status(source, msg.data, time.monotonic())
+        if changed:
+            kind, label = changed
+            names = {'manager': 'マネージャ', 'approach': '接近', 'grasp': '把持'}
+            # missed は異常ではないので warn（error にしない）
+            level = {'fail': 'error', 'missed': 'warn'}.get(kind, 'info')
+            self._log('[%s] %s' % (names.get(source, source), label), level)
+
+    def _on_team_target(self, msg):
+        h = msg.header
+        pt = msg.point
+        if self.team.on_target(h.frame_id, pt.x, pt.y, pt.z, time.monotonic()):
+            if h.frame_id:
+                self._log('[対象] 固定 (%.3f, %.3f, %.3f) %s'
+                          % (pt.x, pt.y, pt.z, h.frame_id), 'info')
+            else:
+                self._log('[対象] 解除', 'info')
+
     def _on_detections(self, msg: String):
         try:
             data = json.loads(msg.data)
@@ -359,7 +481,14 @@ class HarvestSequencer(Node):
     # ------------------------------------------------------------------ #
     def _cmd_set_enable(self, cmd):
         """UI からのアーム指令 publish を有効／無効にする."""
-        self.enable_arm_command = bool(cmd.get('value', False))
+        want = bool(cmd.get('value', False))
+        if want and self._command_topic_taken:
+            # 画面のトグルで戻せてしまうと安全弁の意味がない
+            self._log('%s は他のノードが publish しているため、'
+                      'UI操作は有効にできません' % self.joint_pub.topic_name, 'warn')
+            self.enable_arm_command = False
+            return
+        self.enable_arm_command = want
         self._log('UI操作を%s' % ('有効化' if self.enable_arm_command else '無効化'), 'info')
 
     def _cmd_start_selection(self, _cmd):
@@ -675,8 +804,14 @@ class HarvestSequencer(Node):
             'tcp_link': self.chain.tcp_link if self.chain else '',
             'tcp_reach': self.chain._reach if self.chain else None,
             'max_cartesian_step': self.max_cartesian_step,
+            # 指令トピックを他のノードが握っているか（ros2_control 構成の検出）。
+            # true なら UI からアームは動かせない
+            'command_topic_taken': self._command_topic_taken,
+            'joint_command_topic': self.joint_pub.topic_name,
             'grasp_plan': [round(v, 4) for v in self.grasp_plan] if self.grasp_plan else None,
             'detections': self.detections,
+            # チームの収穫システムが言っていること（段階1：表示だけ）
+            'team': self.team.snapshot(time.monotonic()),
             'stamp': time.time(),
         }
         msg = String()

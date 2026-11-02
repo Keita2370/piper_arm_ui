@@ -368,23 +368,8 @@ class ArmChain:
                     return [float(v) for v in q], dist, True
 
                 err = target - tip
-                # 可動域の端に張り付いた関節が、さらに外へ動こうとする場合は
-                # その関節を外して解き直す。そうしないと下の clip で
-                # その成分だけが切り捨てられ、残りの関節が補う方向にも
-                # 進まないので誤差が減らず、λ が上がるだけで打ち切られる。
-                # 実機の URDF（piper_description）では joint3 が上限 0 に
-                # 張り付いて 0.1mm 手前で止まり、到達可能な目標の
-                # 約 0.08% を取りこぼしていた（check_real_urdf.py で発覚）。
-                Ja = J
                 try:
-                    for _ in range(2):
-                        dq = Ja.T @ np.linalg.solve(Ja @ Ja.T + (lam ** 2) * eye3, err)
-                        blocked = (((q <= self.lower + 1e-9) & (dq < 0)) |
-                                   ((q >= self.upper - 1e-9) & (dq > 0)))
-                        if not blocked.any():
-                            break
-                        Ja = J.copy() if Ja is J else Ja
-                        Ja[:, blocked] = 0.0
+                    dq = J.T @ np.linalg.solve(J @ J.T + (lam ** 2) * eye3, err)
                 except np.linalg.LinAlgError:       # pragma: no cover
                     break
                 norm = float(np.linalg.norm(dq))

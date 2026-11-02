@@ -212,6 +212,24 @@ body { display: flex; flex-direction: column; }
   width: 16px; height: 16px; border-radius: 50%; background: #26394c;
   color: var(--text); display: grid; place-items: center; font-size: 10px;
 }
+/* チームの収穫システムの状態（段階1：表示だけ） */
+.team { margin: 8px 12px 0; padding: 6px 10px; background: var(--bg-panel-2);
+        border: 1px solid var(--border); border-radius: 8px; font-size: 12px; }
+.team-head { font-size: 11px; color: var(--text-dim); margin-bottom: 2px; }
+.team-note { font-size: 10px; }
+.team-rows { margin: 0; }
+.team-rows div { display: flex; justify-content: space-between; gap: 8px; padding: 3px 0;
+                 border-bottom: 1px solid rgba(255,255,255,.05); }
+.team-rows div:last-child { border-bottom: 0; }
+.team-rows dt { color: var(--text-dim); flex: 0 0 auto; }
+.team-rows dd { margin: 0; text-align: right; overflow-wrap: anywhere;
+                font-variant-numeric: tabular-nums; }
+.team-rows dd.k-absent, .team-rows dd.k-idle { color: var(--text-dim); }
+.team-rows dd.k-busy { color: var(--warn); }
+.team-rows dd.k-ok { color: var(--ok); }
+.team-rows dd.k-missed { color: var(--warn); }
+.team-rows dd.k-fail { color: var(--danger); }
+
 .steps li.is-done { color: var(--ok); border-color: #1f5c3a; }
 .steps li.is-done span { background: var(--ok); color: #0b1a11; }
 .steps li.is-active { color: #fff; border-color: var(--accent); background: #16324a; }
@@ -494,3 +512,8 @@ body.is-viewonly .page #chk-overlay {
 }
 .view-buttons button:hover { color: var(--text); border-color: var(--accent); }
 .view-buttons button:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+
+/* 指令トピックを他のノードが握っていて、UI からアームを動かせないとき。
+   押せるトグルのまま効かないのが一番わかりにくいので、無効だと見せる。 */
+.switch.is-blocked { opacity: .5; cursor: not-allowed; }
+.switch.is-blocked span { text-decoration: line-through; }

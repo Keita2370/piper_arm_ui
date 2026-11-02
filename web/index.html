@@ -132,6 +132,18 @@
         <li data-state="RELEASING"><span>5</span>開放</li>
       </ol>
 
+      <!-- チームの収穫システム（~/lemon_ws）が言っていること。表示だけ。
+           上の工程表示（UI 自身の状態機械）とはまだ連動していない -->
+      <div class="team" id="team-status">
+        <div class="team-head">収穫システムの状態 <span class="team-note">（表示のみ）</span></div>
+        <dl class="team-rows">
+          <div data-team="target"><dt>対象</dt><dd>—</dd></div>
+          <div data-team="manager"><dt>マネージャ</dt><dd>—</dd></div>
+          <div data-team="approach"><dt>接近</dt><dd>—</dd></div>
+          <div data-team="grasp"><dt>把持</dt><dd>—</dd></div>
+        </dl>
+      </div>
+
       <div class="actions">
         <button class="act" data-cmd="start_selection">把持対象の選択</button>
         <button class="act" data-cmd="plan_grasp">把持（把持姿勢の計算）</button>

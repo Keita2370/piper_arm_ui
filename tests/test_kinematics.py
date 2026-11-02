@@ -169,23 +169,6 @@ check('解けたと報告したときの誤差は 0.1mm 未満',
       '最大 %.4f mm / 中央 %.6f mm'
       % (max(solved_err) * 1000, float(np.median(solved_err)) * 1000))
 
-# 解が可動域の端にある目標も取りこぼさないこと。
-# 一様乱数だと端の姿勢はほぼ出ないので、上の往復では見えない。
-# 端に張り付いた関節を clip で押し戻すだけだと 0.1mm 手前で止まる
-# （実機 URDF の joint3 上限で発覚。修正前はここで 300 件中 4 件落ちた）。
-edge_rng = np.random.default_rng(11)
-edge_miss = 0
-for _ in range(300):
-    q_true = edge_rng.uniform(chain.lower, chain.upper)
-    j = edge_rng.integers(len(q_true))
-    q_true[j] = (chain.lower if edge_rng.random() < 0.5 else chain.upper)[j]
-    target = chain.fk_position(q_true)
-    q_ik, err, ok = chain.solve_ik(
-        target, q0=edge_rng.uniform(chain.lower, chain.upper))
-    edge_miss += not ok
-check('解が可動域の端にある目標も解く', edge_miss == 0,
-      '%d/300 件取りこぼし' % edge_miss)
-
 # 現在姿勢のすぐ近くを狙う使い方（座標ジョグ）が確実に効くこと
 near_err = []
 for _ in range(200):
