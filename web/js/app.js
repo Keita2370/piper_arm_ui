@@ -654,6 +654,7 @@
     el.tagCount.textContent = `収穫 ${state.harvest_count || 0} 個`;
 
     renderXyz(state);
+    applyBackendLabels(state.backend === 'lemon');
     renderTeam(state.team);
 
     // 収穫位置ボタンの選択表示
@@ -769,6 +770,41 @@
       `<div><dt>${k}</dt><dd class="${cls}">${v}</dd></div>`).join('');
   }
 
+  // backend:=lemon ではボタンの意味が変わるので、ラベルも変える（計画書 §5）。
+  // 元のラベルは覚えておき、internal に戻ったら戻す
+  const LEMON_LABELS = {
+    start_selection: '対象を解除', plan_grasp: '把持姿勢へ移動', release: '開放',
+  };
+  const originalLabels = {};
+  function applyBackendLabels(lemon) {
+    Object.entries(LEMON_LABELS).forEach(([cmd, label]) => {
+      const b = document.querySelector(`.act[data-cmd="${cmd}"]`);
+      if (!b) return;
+      if (!(cmd in originalLabels)) originalLabels[cmd] = b.textContent;
+      b.textContent = lemon ? label : originalLabels[cmd];
+    });
+  }
+
+  // UI が呼んだサービスの様子（lemon のとき）。動いているものを優先して出す
+  const CALL_LABELS = {
+    go_home: 'ホームへ移動中', open: 'グリッパを開いています', release: '対象を解除中',
+    select: '対象を選択中', clear_exclusions: '除外をクリア中', stop: '停止を要求中',
+    approach: '把持姿勢へ移動中', grasp: '把持中（差し込み・閉じる・戻り）',
+  };
+  function uiCallText(state) {
+    const calls = state.calls || {};
+    if (state.motion_busy) {
+      return [`${CALL_LABELS[state.motion_busy] || state.motion_busy}…`, 'busy'];
+    }
+    const recent = Object.entries(calls)
+      .filter(([, c]) => c && c.age !== null && c.age !== undefined)
+      .sort((a, b) => a[1].age - b[1].age)[0];
+    if (!recent) return ['—', 'absent'];
+    const [key, c] = recent;
+    const name = (CALL_LABELS[key] || key).replace(/中$/, '');
+    return [`${name}: ${c.message || ''}（${c.age.toFixed(1)} 秒前）`, c.success ? 'ok' : 'fail'];
+  }
+
   // チームの収穫システムの状態（段階1：表示だけ）。
   // 相手の文字列がそのまま来るので innerHTML ではなく textContent で入れる
   function renderTeam(team) {
@@ -780,8 +816,14 @@
       dd.className = kind ? `k-${kind}` : '';
     };
     if (!team) {
-      ['target', 'manager', 'approach', 'grasp'].forEach((k) => put(k, '—', 'absent'));
+      ['target', 'manager', 'approach', 'grasp', 'ui'].forEach((k) => put(k, '—', 'absent'));
       return;
+    }
+    if (latest && latest.backend === 'lemon') {
+      const [text, kind] = uiCallText(latest);
+      put('ui', text, kind);
+    } else {
+      put('ui', '—（internal）', 'absent');
     }
 
     const tg = team.target || {};
@@ -810,6 +852,33 @@
   function updateButtons(state) {
     const s = state.state;
     const enable = (sel, cond) => $$(sel).forEach((b) => { b.disabled = !cond; });
+    // backend:=lemon のときだけ出す。呼び出し中は押せない（二重に呼ばない）
+    const lemon = state.backend === 'lemon';
+    const calls = state.calls || {};
+    $$('[data-cmd="clear_exclusions"]').forEach((b) => { b.hidden = !lemon; });
+    enable('[data-cmd="clear_exclusions"]',
+      lemon && state.enable_arm_command && !(calls.clear_exclusions || {}).busy);
+    if (lemon) {
+      // home / 開放 / 対象を解除 / 把持姿勢へ移動 / 把持 / 停止。収穫位置（§6）は隠す
+      const on = !!state.enable_arm_command;
+      const moving = !!state.motion_busy;
+      const locked = !!(state.team && state.team.target && state.team.target.locked);
+      const basket = $('#basket-row');
+      if (basket) basket.hidden = true;
+      enable('[data-cmd="home"]', on && !moving);
+      enable('[data-cmd="release"]', on && !moving);
+      enable('[data-cmd="start_selection"]', on && !moving && locked);
+      // 把持姿勢へ移動: 対象が固定されているとき。
+      // 把持: 同じ対象への接近が済んだ直後だけ（いまの姿勢から差し込むため）
+      enable('[data-cmd="plan_grasp"]', on && !moving && locked);
+      enable('[data-cmd="grasp"]', on && !moving && locked && !!state.approached);
+      return;
+    }
+    const basket = $('#basket-row');
+    if (basket) basket.hidden = false;
+    // lemon で押せなくしたものを戻す（internal ではいつでも押せる）
+    enable('[data-cmd="home"]', true);
+    enable('[data-cmd="start_selection"]', true);
     enable('[data-cmd="plan_grasp"]', s === 'SELECTED');
     enable('[data-cmd="grasp"]', s === 'PLANNED' || s === 'SELECTED');
     enable('[data-cmd="goto_basket"]', s === 'GRASPED' || s === 'AT_BASKET');

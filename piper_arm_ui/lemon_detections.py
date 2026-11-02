@@ -48,7 +48,7 @@ def ellipse_box(major, minor, minor_angle):
     return half_w, half_h
 
 
-def convert(lemons, width, height):
+def convert(lemons, width, height, frame_id=''):
     """LemonEllipse の並び → UI の targets（dict の list）.
 
     id は YOLO の tracking ID。実機は use_tracking:=False で空なので、そのときは
@@ -69,6 +69,11 @@ def convert(lemons, width, height):
             'confidence': round(float(lemon.score), 3),
             'label': str(getattr(lemon, 'class_name', '') or 'lemon'),
             'locked': False,
+            # 3D の中心（frame_id の座標系＝カメラの光学座標系）。UI で枠をクリックしたとき
+            # この位置を /lemon_target/select に渡す（base_link への変換は相手がする）
+            'xyz': [round(float(lemon.center.x), 4), round(float(lemon.center.y), 4),
+                    round(float(lemon.center.z), 4)],
+            'frame_id': frame_id,
         })
     return out
 
@@ -189,7 +194,7 @@ def _make_node():
                     'camera_info がまだ来ていないので検出を送れません',
                     throttle_duration_sec=5.0)
                 return
-            targets = convert(msg.lemons, self.width, self.height)
+            targets = convert(msg.lemons, self.width, self.height, msg.header.frame_id)
             mark_locked(targets, msg.lemons,
                         self._target_in(msg.header.frame_id), self.match_radius)
             out = String()

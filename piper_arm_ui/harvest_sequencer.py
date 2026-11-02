@@ -21,6 +21,7 @@ import os
 import time
 
 import rclpy
+from rclpy.callback_groups import ReentrantCallbackGroup
 from rclpy.node import Node
 from rclpy.qos import DurabilityPolicy, HistoryPolicy, QoSProfile, ReliabilityPolicy
 
@@ -59,6 +60,16 @@ from piper_arm_ui.common import (
 from piper_arm_ui.kinematics import ArmChain, ChainError, find_description_file
 from piper_arm_ui.team_status import TeamStatus
 
+# backend:=lemon で受け付けるコマンド（段階5まで）。それ以外（収穫位置・ジョグ・
+# 座標指定）は理由を出して何もしない。内部の状態機械を間違って動かさないため
+#   start_selection → 対象を解除 / plan_grasp → 把持姿勢へ移動 / grasp → 把持 /
+#   home → home へ / release → 開放 / abort → 停止
+LEMON_COMMANDS = ('set_enable', 'select_target', 'clear_exclusions',
+                  'start_selection', 'plan_grasp', 'grasp', 'home', 'release', 'abort')
+
+# approach が済んだとみなす対象と、いまの対象が同じかの判定 [m]
+SAME_TARGET = 0.005
+
 
 class Trajectory:
     """関節空間の線形補間（S字加減速つき）で目標姿勢まで動かす簡易軌道."""
@@ -89,6 +100,9 @@ class HarvestSequencer(Node):
     def __init__(self):
         super().__init__('harvest_sequencer')
 
+        # internal: 自前の状態機械＋軌道＋/joint_states（実機なしの開発用、従来どおり）
+        # lemon:    チームの収穫システムのサービスを呼ぶ（ミニPC。/joint_states は使わない）
+        self.declare_parameter('backend', 'internal')
         self.declare_parameter('enable_arm_command', False)
         self.declare_parameter('joint_command_topic', '/joint_states')
         self.declare_parameter('joint_feedback_topic', '/joint_states_single')
@@ -137,7 +151,20 @@ class HarvestSequencer(Node):
         self.declare_parameter('team_target_topic', TOPIC_TEAM_TARGET)
 
         p = self.get_parameter
-        self.enable_arm_command = bool(p('enable_arm_command').value)
+        self.backend = str(p('backend').value or 'internal').lower()
+        if self.backend not in ('internal', 'lemon'):
+            raise ValueError('backend は internal か lemon: %s' % self.backend)
+        # lemon では /joint_states に何も出さないので、関節指令は常に無効
+        self.enable_arm_command = (bool(p('enable_arm_command').value)
+                                   if self.backend == 'internal' else False)
+        # lemon の「UI操作を有効化」= サービスを呼んでよいか（計画書 §5）。既定は OFF
+        self.service_enabled = False
+        # approach が成功したときの対象の位置（base_link）。grasp はこれが今の対象と
+        # 同じときだけ呼ぶ。grasp は「いまの姿勢から」差し込むので、pregrasp に居ないまま
+        # 呼ぶと、ありえない向きから差し込みに行く
+        self.approached = None
+        # 最後に「停止」を押した時刻。そのあとに返ってきた失敗は「停止で止めた」と出す
+        self._stop_at = None
         self.step_duration = float(p('stub_step_duration').value)
         self.motion_speed = max(0, min(100, int(p('motion_speed').value)))
         self.gripper_effort = float(p('gripper_effort').value)
@@ -185,8 +212,12 @@ class HarvestSequencer(Node):
                          history=HistoryPolicy.KEEP_LAST)
 
         # --- publisher ---
-        self.joint_pub = self.create_publisher(
+        # lemon では /joint_states の publisher そのものを作らない。この構成では
+        # /joint_states は joint_state_broadcaster の出力で、混ぜると現在姿勢が壊れる
+        # （ワークスペースの CLAUDE.md §4）。作らなければ間違えて出すことも無い
+        self.joint_pub = (self.create_publisher(
             JointState, p('joint_command_topic').value, 10)
+            if self.backend == 'internal' else None)
         self.state_pub = self.create_publisher(String, TOPIC_UI_STATE, qos)
         self.log_pub = self.create_publisher(String, TOPIC_UI_LOG, qos)
 
@@ -208,6 +239,15 @@ class HarvestSequencer(Node):
         self._instance_id = '%s#%d' % (self.get_name(), os.getpid())
         # 起動直後は相手を見つけられないので、少し待ってから1回だけ確かめる
         self._dup_timer = self.create_timer(5.0, self._check_duplicates)
+
+        # --- チームのサービス（backend:=lemon）---
+        # クライアントだけ Reentrant のグループにし、結果は別スレッドで待つ
+        # （lemon_backend.py）。ほかのコールバックは既定のグループのまま順に処理する
+        self.callers = {}
+        if self.backend == 'lemon':
+            from piper_arm_ui.lemon_backend import make_callers
+            self._service_group = ReentrantCallbackGroup()
+            self.callers = make_callers(self, self._service_group)
         # 相手のノードが居るかを数える。manager は auto_run:=false では居ないのが
         # 正しいので、「何も来ない」と「居ない」を画面で区別できるようにする
         self.create_timer(1.0, self._check_team_presence)
@@ -311,6 +351,8 @@ class HarvestSequencer(Node):
         この取り違えは画面を見ても分からないので、他に publisher がいたら
         指令を止めて理由を出す。判断に迷うときは止める側に倒す。
         """
+        if self.joint_pub is None:      # lemon: そもそも publish しない
+            return
         topic = self.joint_pub.topic_name
         try:
             count = self.count_publishers(topic)
@@ -436,7 +478,7 @@ class HarvestSequencer(Node):
             kind, label = changed
             names = {'manager': 'マネージャ', 'approach': '接近', 'grasp': '把持'}
             # missed は異常ではないので warn（error にしない）
-            level = {'fail': 'error', 'missed': 'warn'}.get(kind, 'info')
+            level = {'fail': 'error', 'missed': 'warn', 'stopped': 'warn'}.get(kind, 'info')
             self._log('[%s] %s' % (names.get(source, source), label), level)
 
     def _on_team_target(self, msg):
@@ -469,7 +511,14 @@ class HarvestSequencer(Node):
             self.get_logger().warn('不正なコマンド: %s' % msg.data)
             return
         name = cmd.get('cmd', '')
-        handler = getattr(self, '_cmd_' + name, None)
+        if self.backend == 'lemon':
+            if name not in LEMON_COMMANDS:
+                self._log('lemon 構成では「%s」はまだ使えません（段階4以降。'
+                          'アームは動かしません）' % name, 'warn')
+                return
+            handler = getattr(self, '_lemon_' + name, None)
+        else:
+            handler = getattr(self, '_cmd_' + name, None)
         if handler is None:
             self.get_logger().warn('未知のコマンド: %s' % name)
             return
@@ -493,6 +542,224 @@ class HarvestSequencer(Node):
             return
         self.enable_arm_command = want
         self._log('UI操作を%s' % ('有効化' if self.enable_arm_command else '無効化'), 'info')
+
+    # ------------------------------------------------------------------ #
+    # backend:=lemon のコマンド（チームのサービスを呼ぶ）
+    # ------------------------------------------------------------------ #
+    def _lemon_set_enable(self, cmd):
+        """lemon の「UI操作を有効化」: サービスを呼んでよいかの元栓."""
+        self.service_enabled = bool(cmd.get('value', False))
+        self._log('UI操作を%s（チームのサービスを%s）'
+                  % (('有効化', '呼びます') if self.service_enabled
+                     else ('無効化', '呼びません')), 'info')
+
+    def _service_gate(self, label):
+        if not self.service_enabled:
+            self._log('「UI操作を有効化」が OFF なので%sはしません' % label, 'warn')
+            return False
+        return True
+
+    def _call(self, key, request, label, on_ok=None, on_done=None):
+        """チームのサービスを呼ぶ。結果は画面のログに出す（すぐ返る）.
+
+        on_ok は成功したとき、on_done は成功・失敗にかかわらず結果が返ったときに呼ぶ。
+        """
+        from piper_arm_ui.lemon_backend import MOTION
+        caller = self.callers.get(key)
+        if caller is None:
+            self._log('%s: サービスが使えません（lemon_msgs が無い？）' % label, 'error')
+            return
+        def done(success, message):
+            text = message or ('成功' if success else '失敗')
+            level = 'info' if success else 'warn'
+            stopped = (not success and key in MOTION and self._stop_at is not None
+                       and caller.started is not None and self._stop_at >= caller.started)
+            if stopped:
+                # 人が止めた。失敗ではない（段階4の実機確認で「execution failed」と出て紛らわしかった）
+                text = '停止で止めました（%s）' % text
+            elif key == 'grasp':
+                from piper_arm_ui.team_status import classify
+                kind, desc = classify('grasp', message)
+                text = desc
+                level = {'ok': 'info', 'missed': 'warn'}.get(kind, 'warn')
+            self._log('%s: %s' % (label, text), level)
+            if on_done:
+                on_done(success, message)
+            if success and on_ok:
+                on_ok(message)
+        if not caller.call(request, done):
+            self._log('%s: 前の呼び出しがまだ終わっていません' % label, 'warn')
+
+    def _motion_gate(self, label):
+        """アームやグリッパが動く呼び出しの前に確かめる.
+
+        - 元栓（UI操作を有効化）が ON
+        - ほかの動く呼び出しが動いていない（相手のノードは自分の busy しか見ないので、
+          home と open を同時に呼べてしまう）
+        - auto_run:=true のマネージャが居ない（2 つが同時に指令すると危ない）
+        """
+        if not self._service_gate(label):
+            return False
+        busy = self.motion_busy()
+        if busy:
+            self._log('%s: いま「%s」が動いているので呼びません' % (label, busy), 'warn')
+            return False
+        if self.team.present.get('manager'):
+            self._log('%s: lemon_harvest_manager（auto_run:=true）が動いているので、'
+                      'UI からはアームを動かしません' % label, 'warn')
+            return False
+        return True
+
+    def motion_busy(self):
+        """動いている呼び出しの名前（無ければ None）."""
+        from piper_arm_ui.lemon_backend import MOTION
+        for key in MOTION:
+            c = self.callers.get(key)
+            if c is not None and c.busy:
+                return key
+        return None
+
+    def _current_target(self):
+        """lemon_target が固定している対象の位置（無ければ None）."""
+        tg = self.team.target
+        if tg and tg.get('frame_id'):
+            return (tg['x'], tg['y'], tg['z'])
+        return None
+
+    def _approached_current(self):
+        """いまの対象に対して approach が済んでいるか."""
+        cur = self._current_target()
+        if self.approached is None or cur is None:
+            return False
+        return max(abs(a - b) for a, b in zip(self.approached, cur)) < SAME_TARGET
+
+    def _lemon_plan_grasp(self, _cmd):
+        """「把持姿勢へ移動」: /lemon_approach/approach（★アームが大きく動く）."""
+        if not self._motion_gate('把持姿勢へ移動'):
+            return
+        target = self._current_target()
+        if target is None:
+            self._log('把持姿勢へ移動: 先にレモンの枠をクリックして対象を選んでください', 'warn')
+            return
+        from std_srvs.srv import Trigger
+        self.approached = None
+
+        def ok(_message):
+            # 返ってくるまでに対象が変わっていたら、済んだことにしない
+            if self._current_target() == target:
+                self.approached = target
+        self._log('把持姿勢へ移動します（対象 %.3f, %.3f, %.3f）' % target, 'info')
+        self._call('approach', Trigger.Request(), '把持姿勢へ移動', on_ok=ok)
+
+    def _lemon_grasp(self, _cmd):
+        """「把持」: /lemon_grasp/grasp（★アームが大きく動く。実機で最大 40 s）.
+
+        同じ対象への approach が成功した直後だけ呼ぶ（理由は self.approached の注記）。
+        掴めても掴めなくても、1 回やったら approach からやり直す。
+        """
+        if not self._motion_gate('把持'):
+            return
+        if not self._approached_current():
+            self._log('把持: 先に「把持姿勢へ移動」をしてください（同じ対象への接近が'
+                      '済んだ直後だけ押せます）', 'warn')
+            return
+        from std_srvs.srv import Trigger
+        self.approached = None
+        self._log('把持を始めます（差し込み中は「停止」で止められます）', 'info')
+        self._call('grasp', Trigger.Request(), '把持')
+
+    def _lemon_home(self, _cmd):
+        """「ホームへ戻す」: /arm_home/go_home（★アームが動く）."""
+        if not self._motion_gate('ホームへ戻す'):
+            return
+        self.approached = None          # pregrasp から離れる
+        from std_srvs.srv import Trigger
+        self._log('ホームへ移動します', 'info')
+        self._call('go_home', Trigger.Request(), 'ホームへ戻す')
+
+    def _lemon_release(self, _cmd):
+        """「開放」: グリッパを開いてから対象を解除する（★グリッパが動く）.
+
+        相手の manager と同じ順（opening → releasing）。開けなかったら対象は残す
+        （まだ掴んでいるかもしれないので、何が起きたか人が見て決める）。
+        """
+        if not self._motion_gate('開放'):
+            return
+        from std_srvs.srv import Trigger
+        self.approached = None
+
+        def then_release(_message):
+            self._call('release', Trigger.Request(), '対象を解除')
+        self._call('open', Trigger.Request(), 'グリッパを開く', on_ok=then_release)
+
+    def _lemon_start_selection(self, _cmd):
+        """「対象を解除」（internal の「把持対象の選択」）: /lemon_target/release.
+
+        アームは動かない。ただし動作中に解除すると、差し込み中の把持が中断される
+        （相手の PoseTracking が止まる）ので、動いている間は断る。止めるなら「停止」。
+        """
+        if not self._service_gate('対象の解除'):
+            return
+        busy = self.motion_busy()
+        if busy:
+            self._log('対象の解除: いま「%s」が動いています。止めるなら「停止」を'
+                      % busy, 'warn')
+            return
+        self.approached = None
+        from std_srvs.srv import Trigger
+        self._call('release', Trigger.Request(), '対象を解除')
+
+    def _lemon_abort(self, _cmd):
+        """「停止」（赤）: ソフト停止。元栓が OFF でも、何が動いていても必ず呼ぶ.
+
+        同時に呼ぶ:
+          - /lemon_grasp/stop（差し込み・閉じる・戻り）
+          - /execute_trajectory の全ゴールの取り消し（home / approach）
+          - /arm_controller/follow_joint_trajectory の全ゴールの取り消し
+        **非常停止ではない**（ソフトが止まっていれば効かない）。画面にもそう出している
+        """
+        self._stop_at = time.monotonic()
+        self.approached = None          # 止めた場所はどこか分からないので、やり直す
+        self._log('停止を要求しました（ソフト停止。非常停止ではありません）', 'warn')
+        from std_srvs.srv import Trigger
+        self._call('stop', Trigger.Request(), '把持の停止')
+        try:
+            from action_msgs.srv import CancelGoal
+        except ImportError:
+            return
+        self._call('cancel_execute', CancelGoal.Request(), 'MoveIt の実行の取り消し')
+        self._call('cancel_arm', CancelGoal.Request(), 'アームの軌道の取り消し')
+
+    def _lemon_clear_exclusions(self, _cmd):
+        """「除外をクリア」ボタン: /lemon_target/clear_exclusions（アームは動かない）."""
+        if not self._service_gate('除外のクリア'):
+            return
+        from std_srvs.srv import Trigger
+        self._call('clear_exclusions', Trigger.Request(), '除外をクリア')
+
+    def _lemon_select_target(self, cmd):
+        """検出枠のクリック: /lemon_target/select（アームは動かない）.
+
+        lemon_detections が各検出に載せているカメラ座標系の位置をそのまま渡す。
+        base_link への変換は lemon_target がする（TF を持っているのは相手）。
+        """
+        if not self._service_gate('対象の選択'):
+            return
+        target_id = cmd.get('id')
+        det = next((d for d in self.detections if d.get('id') == target_id), None)
+        if det is None:
+            self._log('ID %s は現在の検出結果にありません' % target_id, 'warn')
+            return
+        xyz, frame = det.get('xyz'), det.get('frame_id')
+        if not xyz or not frame:
+            self._log('検出 #%s に位置が載っていません（lemon_detections が古い？）'
+                      % target_id, 'warn')
+            return
+        from lemon_msgs.srv import SelectTarget
+        req = SelectTarget.Request()
+        req.point.header.frame_id = str(frame)
+        req.point.point.x, req.point.point.y, req.point.point.z = (float(v) for v in xyz)
+        self._call('select', req, '対象 #%s を選択' % target_id)
 
     def _cmd_start_selection(self, _cmd):
         """「把持対象の選択」ボタン: 選択モードに入る."""
@@ -721,7 +988,7 @@ class HarvestSequencer(Node):
                         self.harvest_count += 1
                     self._set_state(next_state, message)
 
-        if self.enable_arm_command:
+        if self.enable_arm_command and self.joint_pub is not None:
             self._publish_joint_command()
 
     def _publish_joint_command(self):
@@ -778,7 +1045,10 @@ class HarvestSequencer(Node):
             'state': self.state,
             'state_label': STATE_LABELS.get(self.state, self.state),
             'message': self.status_message,
-            'enable_arm_command': self.enable_arm_command,
+            # lemon では「UI操作を有効化」のトグルはサービスの元栓（service_enabled）
+            'enable_arm_command': (self.service_enabled if self.backend == 'lemon'
+                                   else self.enable_arm_command),
+            'backend': self.backend,
             'progress': round(self.trajectory.progress, 3) if self.trajectory else None,
             'selected_id': self.selected_id,
             'basket_index': self.basket_index,
@@ -810,11 +1080,17 @@ class HarvestSequencer(Node):
             # 指令トピックを他のノードが握っているか（ros2_control 構成の検出）。
             # true なら UI からアームは動かせない
             'command_topic_taken': self._command_topic_taken,
-            'joint_command_topic': self.joint_pub.topic_name,
+            'joint_command_topic': self.joint_pub.topic_name if self.joint_pub else '',
             'grasp_plan': [round(v, 4) for v in self.grasp_plan] if self.grasp_plan else None,
             'detections': self.detections,
             # チームの収穫システムが言っていること（段階1：表示だけ）
             'team': self.team.snapshot(time.monotonic()),
+            # チームのサービスの呼び出し（busy / 最後の結果）。lemon のときだけ中身がある
+            'calls': {k: c.snapshot(time.monotonic()) for k, c in self.callers.items()},
+            # アームやグリッパが動いている呼び出し（UI はその間、動くボタンを押せなくする）
+            'motion_busy': self.motion_busy() if self.callers else None,
+            # いまの対象への approach が済んでいる（＝「把持」を押してよい）
+            'approached': self._approached_current() if self.callers else False,
             'stamp': time.time(),
         }
         msg = String()
@@ -825,8 +1101,14 @@ class HarvestSequencer(Node):
 def main(args=None):
     rclpy.init(args=args)
     node = HarvestSequencer()
+    # 複数スレッドで回す。既存のコールバック（タイマー・コマンド・購読）は既定の
+    # グループ（同時に1つ）のままなので、順番と排他は単一スレッドのときと変わらない。
+    # サービスの応答だけが Reentrant のグループで並行に受け取られる（lemon_backend.py）
+    from rclpy.executors import MultiThreadedExecutor
+    executor = MultiThreadedExecutor(num_threads=4)
+    executor.add_node(node)
     try:
-        rclpy.spin(node)
+        executor.spin()
     except KeyboardInterrupt:
         pass
     finally:

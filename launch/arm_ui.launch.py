@@ -213,6 +213,9 @@ def generate_launch_description():
         # --- その他 ---
         DeclareLaunchArgument('enable_arm_command', default_value='false',
                               description='UI から /joint_states を publish するか'),
+        DeclareLaunchArgument('backend', default_value='internal',
+                              description='internal: 自前の状態機械（開発用）／'
+                                          'lemon: チームの収穫システムのサービスを呼ぶ（ミニPC）'),
         DeclareLaunchArgument('use_dummy_perception', default_value='true',
                               description='レモン検出のダミーを起動するか'),
         DeclareLaunchArgument('use_lemon_detections', default_value='false',
@@ -339,6 +342,7 @@ def generate_launch_description():
         output='screen',
         parameters=[params_file, {
             'enable_arm_command': LaunchConfiguration('enable_arm_command'),
+            'backend': LaunchConfiguration('backend'),
             # 座標指定（手先位置）の IK に使う。ui_server と
             # robot_state_publisher と同じ URDF を渡して、
             # 3 者の手先位置が食い違わないようにする。

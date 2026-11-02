@@ -21,7 +21,7 @@ SOURCES = ('manager', 'approach', 'grasp')
 def classify(source, text):
     """status 文字列を (種別, 画面表示) にする.
 
-    種別は idle / busy / ok / missed / fail。
+    種別は idle / busy / ok / missed / stopped / fail。
     """
     text = (text or '').strip()
     known = TEAM_STATUS_LABELS.get(source, {}).get(text)
@@ -35,6 +35,10 @@ def classify(source, text):
             return ('fail', '戻りに失敗: %s' % text)
         if text.startswith('missed'):
             return ('missed', '掴めませんでした（%s）' % text)
+        # /lemon_grasp/stop で止めた（人が止めた）。異常ではない。
+        # 止めたあとはレモンや枝の近くに残るので、それも出す
+        if text.startswith('stopped'):
+            return ('stopped', '停止しました（%s）。アームはその場に残っています' % text)
     # 相手は失敗の message をそのまま status に流す。列挙しきれないので素通し
     return ('fail', text)
 

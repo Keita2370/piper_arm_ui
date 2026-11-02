@@ -256,6 +256,111 @@ with sync_playwright() as pw:
     check('検出の数のタグ', page.inner_text('#tag-detections') == '検出 2',
           page.inner_text('#tag-detections'))
 
+    # ---- 除外をクリア（backend:=lemon のときだけ）--------------------------
+    btn = '[data-cmd="clear_exclusions"]'
+    stack.state = dict(BASE_STATE, team=team())          # backend 無し＝internal
+    settle(page)
+    check('internal では「除外をクリア」を出さない', not page.is_visible(btn))
+    stack.state = dict(BASE_STATE, team=team(), backend='lemon', enable_arm_command=False,
+                       calls={'clear_exclusions': {'busy': False}})
+    settle(page)
+    check('lemon では「除外をクリア」を出す', page.is_visible(btn))
+    check('UI操作が OFF なら押せない', page.is_disabled(btn))
+    stack.state = dict(stack.state, enable_arm_command=True)
+    settle(page)
+    check('UI操作が ON なら押せる', not page.is_disabled(btn))
+    stack.state = dict(stack.state, calls={'clear_exclusions': {'busy': True}})
+    settle(page)
+    check('呼び出し中は押せない（二重に呼ばない）', page.is_disabled(btn))
+    stack.state = dict(stack.state, calls={'clear_exclusions': {'busy': False}})
+    settle(page)
+    stack.published.clear()
+    page.click(btn)
+    page.wait_for_timeout(300)
+    cmds = [json.loads(op['msg']['data']) for op in stack.published
+            if op.get('topic') == '/arm_ui/command']
+    check('押すと clear_exclusions を送る', {'cmd': 'clear_exclusions'} in cmds, cmds)
+
+    # ---- 段階4: lemon のボタン ---------------------------------------------
+    locked_t = {'present': True, 'seen': True, 'locked': True, 'frame_id': 'base_link',
+                'point': [0.36, 0.05, 0.03], 'age': 1.0}
+    lemon = dict(BASE_STATE, backend='lemon', enable_arm_command=True,
+                 team=team(target=locked_t), calls={}, motion_busy=None)
+    stack.state = lemon
+    settle(page)
+    check('停止ボタンの横に「非常停止ではありません」を出し続ける',
+          page.is_visible('.estop-note') and '非常停止ではありません' in page.inner_text('.estop-note'))
+    check('lemon では「把持対象の選択」が「対象を解除」になる',
+          page.inner_text('.act[data-cmd="start_selection"]') == '対象を解除')
+    check('lemon では「開放（収穫完了）」が「開放」になる',
+          page.inner_text('.act[data-cmd="release"]') == '開放')
+    check('lemon では収穫位置①②③を隠す（相手に無い、計画書 §6）',
+          not page.is_visible('#basket-row'))
+    check('ホームへ戻すは押せる', not page.is_disabled('.act[data-cmd="home"]'))
+    check('開放は押せる', not page.is_disabled('.act[data-cmd="release"]'))
+    check('対象が固定されていれば「対象を解除」を押せる',
+          not page.is_disabled('.act[data-cmd="start_selection"]'))
+    check('lemon では「把持（把持姿勢の計算）」が「把持姿勢へ移動」になる',
+          page.inner_text('.act[data-cmd="plan_grasp"]') == '把持姿勢へ移動')
+    check('対象が固定されていれば「把持姿勢へ移動」を押せる',
+          not page.is_disabled('.act[data-cmd="plan_grasp"]'))
+    check('接近の前は「把持」を押せない（いまの姿勢から差し込むので危ない）',
+          page.is_disabled('.act[data-cmd="grasp"]'))
+    stack.state = dict(lemon, approached=True)
+    settle(page)
+    check('接近が済んだら「把持」を押せる', not page.is_disabled('.act[data-cmd="grasp"]'))
+    stack.state = dict(lemon, approached=True, motion_busy='grasp',
+                       calls={'grasp': {'busy': True, 'success': None, 'message': None, 'age': None}})
+    settle(page)
+    check('把持の間は「把持」も「把持姿勢へ移動」も押せない',
+          page.is_disabled('.act[data-cmd="grasp"]') and page.is_disabled('.act[data-cmd="plan_grasp"]'))
+    check('把持の間は「UI の操作」に「把持中」と出る', '把持中' in row(page, 'ui')[0], row(page, 'ui'))
+    stack.state = lemon
+    settle(page)
+
+    stack.state = dict(lemon, team=team())
+    settle(page)
+    check('対象が無ければ「対象を解除」は押せない',
+          page.is_disabled('.act[data-cmd="start_selection"]'))
+    check('対象が無ければ「把持姿勢へ移動」も押せない',
+          page.is_disabled('.act[data-cmd="plan_grasp"]'))
+
+    stack.state = dict(lemon, motion_busy='go_home',
+                       calls={'go_home': {'busy': True, 'success': None, 'message': None, 'age': None}})
+    settle(page)
+    check('home の間はホームも開放も押せない',
+          page.is_disabled('.act[data-cmd="home"]') and page.is_disabled('.act[data-cmd="release"]'))
+    check('「UI の操作」に「ホームへ移動中…」と出る',
+          'ホームへ移動中' in row(page, 'ui')[0], row(page, 'ui'))
+    check('home の間も停止ボタンは押せる', not page.is_disabled('#btn-estop'))
+    stack.published.clear()
+    page.click('#btn-estop')
+    page.wait_for_timeout(300)
+    cmds = [json.loads(op['msg']['data']) for op in stack.published
+            if op.get('topic') == '/arm_ui/command']
+    check('停止ボタンは abort を送る', {'cmd': 'abort'} in cmds, cmds)
+
+    stack.state = dict(lemon, enable_arm_command=False)
+    settle(page)
+    check('UI操作が OFF ならホームも開放も押せない',
+          page.is_disabled('.act[data-cmd="home"]') and page.is_disabled('.act[data-cmd="release"]'))
+    check('UI操作が OFF でも停止ボタンは押せる', not page.is_disabled('#btn-estop'))
+
+    stack.state = dict(lemon, calls={'go_home': {'busy': False, 'success': True,
+                                                 'message': 'reached', 'age': 2.5}})
+    settle(page)
+    check('終わったら「UI の操作」に最後の結果を出す',
+          'reached' in row(page, 'ui')[0] and 'k-ok' in row(page, 'ui')[1], row(page, 'ui'))
+
+    stack.state = dict(BASE_STATE, team=team())          # internal に戻す
+    settle(page)
+    check('internal では元のラベルに戻る',
+          page.inner_text('.act[data-cmd="start_selection"]') == '把持対象の選択'
+          and page.inner_text('.act[data-cmd="plan_grasp"]') == '把持（把持姿勢の計算）'
+          and page.inner_text('.act[data-cmd="release"]') == '開放（収穫完了）')
+    check('internal では収穫位置を出す', page.is_visible('#basket-row'))
+    check('internal ではホームを押せる', not page.is_disabled('.act[data-cmd="home"]'))
+
     check('コンソールエラーなし', not errors, errors[:3])
     browser.close()
 

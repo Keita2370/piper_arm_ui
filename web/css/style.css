@@ -86,6 +86,7 @@ body { display: flex; flex-direction: column; }
   padding: 10px 20px; border-radius: 9px; min-height: 44px;
 }
 .estop:active { transform: translateY(1px); }
+.estop-note { font-size: 10px; line-height: 1.25; color: var(--warn); white-space: nowrap; }
 
 /* ---------------- ページ ---------------- */
 .page { display: none; flex: 1 1 auto; min-height: 0; flex-direction: column; }
@@ -228,6 +229,7 @@ body { display: flex; flex-direction: column; }
 .team-rows dd.k-busy { color: var(--warn); }
 .team-rows dd.k-ok { color: var(--ok); }
 .team-rows dd.k-missed { color: var(--warn); }
+.team-rows dd.k-stopped { color: var(--warn); }
 .team-rows dd.k-fail { color: var(--danger); }
 
 .steps li.is-done { color: var(--ok); border-color: #1f5c3a; }
@@ -455,6 +457,8 @@ body { display: flex; flex-direction: column; }
 }
 .btn-small:hover { border-color: var(--accent); }
 .btn-small[hidden] { display: none; }
+/* .act は display を指定しているので、hidden を明示しないと隠れない */
+.act[hidden], .act-row[hidden] { display: none; }
 .btn-small.btn-primary {
   background: var(--accent-dark);
   border-color: var(--accent-dark);

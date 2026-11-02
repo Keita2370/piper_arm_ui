@@ -88,6 +88,10 @@ check('枠の全高 = 2×半高 / 高さ', t['h'] == round(2 * 48 / 480, 4), t['
 check('distance は center.z（光学座標系の奥行き）', t['distance'] == 0.36, t['distance'])
 check('confidence は score', t['confidence'] == 0.96, t['confidence'])
 check('印は既定で付けない', t['locked'] is False)
+t = convert([lemon(320, 240, 48, 32, 0.0, xyz=(0.01, 0.02, 0.36))], 640, 480,
+            'camera_color_optical_frame')[0]
+check('3D 位置を載せる（select に渡すため）', t['xyz'] == [0.01, 0.02, 0.36], t['xyz'])
+check('3D 位置の座標系を載せる', t['frame_id'] == 'camera_color_optical_frame', t['frame_id'])
 
 ts = convert([lemon(100, 100, 10, 10), lemon(200, 200, 10, 10)], 640, 480)
 check('id が空なら並び順で 1 から振る', [x['id'] for x in ts] == [1, 2], [x['id'] for x in ts])

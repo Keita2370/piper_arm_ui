@@ -26,7 +26,9 @@
     <span class="pill" id="pill-ros"><i></i>rosbridge</span>
     <span class="pill" id="pill-video"><i></i>映像</span>
     <span class="pill" id="pill-arm"><i></i>アーム</span>
-    <button class="estop" id="btn-estop">停止</button>
+    <button class="estop" id="btn-estop" title="ソフト停止です。確実に止めるには物理的な非常停止を">停止</button>
+    <!-- 出し続けること（ワークスペースの CLAUDE.md §5）。できないことをできるように見せない -->
+    <span class="estop-note">ソフト停止<br>（非常停止ではありません）</span>
   </div>
 </header>
 
@@ -141,6 +143,7 @@
           <div data-team="manager"><dt>マネージャ</dt><dd>—</dd></div>
           <div data-team="approach"><dt>接近</dt><dd>—</dd></div>
           <div data-team="grasp"><dt>把持</dt><dd>—</dd></div>
+          <div data-team="ui"><dt>UI の操作</dt><dd>—</dd></div>
         </dl>
       </div>
 
@@ -148,7 +151,7 @@
         <button class="act" data-cmd="start_selection">把持対象の選択</button>
         <button class="act" data-cmd="plan_grasp">把持（把持姿勢の計算）</button>
         <button class="act act-primary" data-cmd="grasp">把持</button>
-        <div class="act-row">
+        <div class="act-row" id="basket-row">
           <span class="act-row-label">収穫位置</span>
           <button class="act act-mini" data-cmd="goto_basket" data-index="1">①</button>
           <button class="act act-mini" data-cmd="goto_basket" data-index="2">②</button>
@@ -156,6 +159,9 @@
         </div>
         <button class="act act-accent" data-cmd="release">開放（収穫完了）</button>
         <button class="act act-ghost" data-cmd="home">ホームへ戻す</button>
+        <!-- チームの lemon_target の除外リストを空にする（backend:=lemon のときだけ出す）。
+             release のたびにその位置が除外され、一通り試すと対象が選べなくなるため -->
+        <button class="act act-ghost" data-cmd="clear_exclusions" hidden>除外をクリア</button>
       </div>
 
       <details class="jog">

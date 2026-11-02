@@ -9,6 +9,8 @@ instantiate できるようにする。以前の e2e ハーネス（mini_ros.py�
 できないこと: DDS、QoS の実際の挙動、別プロセス間通信。
 """
 import sys
+import threading
+import time
 import types
 
 
@@ -86,6 +88,64 @@ class _Timer:
         self.cancelled = True
 
 
+# --- サービスの模擬 ----------------------------------------------------- #
+# テストから {サービス名: handler(request) -> response} を仕込む。handler は
+# 別スレッドで呼ばれる（本物と同じく、応答は呼び出し側のスレッドとは別に届く）。
+# 仕込んでいない名前は「相手が居ない」扱い（wait_for_service が False）。
+SERVICES = {}
+SERVICE_CALLS = []        # (サービス名, request) の記録
+
+
+class _Future:
+    def __init__(self):
+        self._done = threading.Event()
+        self._result = None
+        self._cbs = []
+        self._lock = threading.Lock()
+
+    def set_result(self, res):
+        with self._lock:
+            self._result = res
+            self._done.set()
+            cbs = list(self._cbs)
+        for cb in cbs:
+            cb(self)
+
+    def add_done_callback(self, cb):
+        with self._lock:
+            if not self._done.is_set():
+                self._cbs.append(cb)
+                return
+        cb(self)
+
+    def done(self):
+        return self._done.is_set()
+
+    def result(self):
+        return self._result
+
+
+class _Client:
+    def __init__(self, srv_type, name):
+        self.srv_type = srv_type
+        self.srv_name = name
+
+    def wait_for_service(self, timeout_sec=None):
+        if self.srv_name in SERVICES:
+            return True
+        if timeout_sec:
+            time.sleep(min(timeout_sec, 0.05))   # 本物ほど待たない（テストを速く）
+        return False
+
+    def call_async(self, request):
+        SERVICE_CALLS.append((self.srv_name, request))
+        fut = _Future()
+        handler = SERVICES[self.srv_name]
+        threading.Thread(target=lambda: fut.set_result(handler(request)),
+                         daemon=True).start()
+        return fut
+
+
 class Node:
     def __init__(self, name):
         self._name = name
@@ -105,14 +165,17 @@ class Node:
         pass
 
     # --- 通信 ---
-    def create_publisher(self, _type, topic, _qos=None):
+    def create_publisher(self, _type, topic, _qos=None, **_kw):
         return _Publisher(topic)
 
-    def create_subscription(self, _type, topic, cb, _qos=None):
+    def create_subscription(self, _type, topic, cb, _qos=None, **_kw):
         BUS.subscribe(topic, cb)
         return types.SimpleNamespace(topic=topic)
 
-    def create_timer(self, period, cb):
+    def create_client(self, srv_type, name, **_kw):
+        return _Client(srv_type, name)
+
+    def create_timer(self, period, cb, **_kw):
         t = _Timer(period, cb)
         self.timers.append(t)
         return t
@@ -151,6 +214,17 @@ class _Msg:
     def __init__(self, **kw):
         for k, v in kw.items():
             setattr(self, k, v)
+
+
+class _Trigger:
+    """std_srvs/Trigger もどき."""
+    class Request(_Msg):
+        pass
+
+    class Response(_Msg):
+        def __init__(self, success=False, message=''):
+            self.success = success
+            self.message = message
 
 
 class String(_Msg):
@@ -198,6 +272,24 @@ def install():
     rclpy.node = node_mod
     rclpy.qos = qos_mod
 
+    cbg_mod = types.ModuleType('rclpy.callback_groups')
+    cbg_mod.ReentrantCallbackGroup = lambda: types.SimpleNamespace(kind='reentrant')
+    cbg_mod.MutuallyExclusiveCallbackGroup = lambda: types.SimpleNamespace(kind='exclusive')
+    rclpy.callback_groups = cbg_mod
+
+    ex_mod = types.ModuleType('rclpy.executors')
+
+    class MultiThreadedExecutor:            # main() でしか使わない
+        def __init__(self, *a, **k):
+            pass
+    ex_mod.MultiThreadedExecutor = MultiThreadedExecutor
+    rclpy.executors = ex_mod
+
+    std_srvs = types.ModuleType('std_srvs')
+    std_srvs_srv = types.ModuleType('std_srvs.srv')
+    std_srvs_srv.Trigger = _Trigger
+    std_srvs.srv = std_srvs_srv
+
     sensor = types.ModuleType('sensor_msgs')
     sensor_msg = types.ModuleType('sensor_msgs.msg')
     sensor_msg.JointState = JointState
@@ -219,6 +311,8 @@ def install():
 
     for name, mod in (
             ('rclpy', rclpy), ('rclpy.node', node_mod), ('rclpy.qos', qos_mod),
+            ('rclpy.callback_groups', cbg_mod), ('rclpy.executors', ex_mod),
+            ('std_srvs', std_srvs), ('std_srvs.srv', std_srvs_srv),
             ('sensor_msgs', sensor), ('sensor_msgs.msg', sensor_msg),
             ('std_msgs', std), ('std_msgs.msg', std_msg),
             ('geometry_msgs', geometry), ('geometry_msgs.msg', geometry_msg)):

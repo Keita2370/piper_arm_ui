@@ -93,6 +93,9 @@ check('missed の表示は「掴めませんでした」で元の文字列も残
 k, _ = classify('grasp', 'missed (gripper closed to 0.0), retreat failed: timeout')
 check('missed でも戻りに失敗していたら fail', k == 'fail', k)
 check('insertion failed は fail', classify('grasp', 'insertion failed: timeout')[0] == 'fail')
+k, label = classify('grasp', 'stopped (while inserting)')
+check('stop で止めたのは fail ではなく stopped', k == 'stopped', k)
+check('止めたらアームがその場に残ると出す', 'その場に残っています' in label, label)
 
 k, label = classify('grasp', 'opening')
 check('grasp の opening は把持の準備（busy）と出す',
