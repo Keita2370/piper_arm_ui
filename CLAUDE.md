@@ -110,10 +110,11 @@ python3 tests/test_cartesian.py    # 座標指定コマンドをシーケンサ�
 python3 tests/test_xyz_ui.py       # 座標指定トグルを Chromium で押す（22項目）
 python3 tests/test_command_topic_guard.py  # /joint_states の安全弁（22項目）
 python3 tests/test_team_status.py  # チームの収穫システムの状態表示（41項目）
-python3 tests/test_team_ui.py      # その表示を Chromium で（20項目）
+python3 tests/test_team_ui.py      # その表示と検出枠の「対象」の印を Chromium で（26項目）
 python3 tests/test_video_relay.py  # 映像を溜めない・同じ絵を送らない・送る映像の選び方（17項目）
 python3 tests/test_video_ui.py     # ブラウザの映像要求・再接続・関節角の間引き（15項目）
 python3 tests/test_arm_status.py   # /arm_status の真偽値の読み方（6項目）
+python3 tests/test_lemon_detections.py  # 検出アダプタ: 楕円→枠、正規化、対象の印、TF は固定中だけ（27項目）
 python3 tests/check_real_urdf.py   # 実機URDFでの運動学の成立確認
 ```
 

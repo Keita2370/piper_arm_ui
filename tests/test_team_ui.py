@@ -150,6 +150,14 @@ stack.start()
 with sync_playwright() as pw:
     browser = pw.chromium.launch(args=['--no-sandbox'])
     page = browser.new_page()
+    # 検出枠の描画を記録する（色とラベル）。canvas の画素を読むより取り違えにくい
+    page.add_init_script('''
+      window.__draw = [];
+      const P = CanvasRenderingContext2D.prototype;
+      const sr = P.strokeRect, ft = P.fillText;
+      P.strokeRect = function (...a) { window.__draw.push({k: 'rect', c: this.strokeStyle, w: this.lineWidth}); return sr.apply(this, a); };
+      P.fillText = function (t, ...a) { window.__draw.push({k: 'text', t: String(t)}); return ft.call(this, t, ...a); };
+    ''')
     errors = []
     page.on('pageerror', lambda e: errors.append(str(e)))
     page.on('console', lambda m: errors.append('console: ' + m.text)
@@ -222,6 +230,31 @@ with sync_playwright() as pw:
     check('表示しただけでコマンドを送らない',
           not any(op.get('topic') == '/arm_ui/command' for op in stack.published),
           [op for op in stack.published if op.get('topic') == '/arm_ui/command'])
+
+    # ---- 検出枠：チームが固定した対象（段階2の lemon_detections が印を付ける）----
+    det = [{'id': 1, 'u': 0.3, 'v': 0.4, 'w': 0.1, 'h': 0.12, 'distance': 0.36,
+            'confidence': 0.96, 'label': 'lemon', 'locked': False},
+           {'id': 2, 'u': 0.6, 'v': 0.5, 'w': 0.1, 'h': 0.12, 'distance': 0.41,
+            'confidence': 0.88, 'label': 'lemon', 'locked': True}]
+    stack.state = dict(BASE_STATE, detections=det, team=team())
+    settle(page)
+    page.evaluate('() => { window.__draw = []; }')
+    page.wait_for_timeout(300)
+    draws = page.evaluate('() => window.__draw')
+    rects = [d for d in draws if d['k'] == 'rect']
+    texts = [d['t'] for d in draws if d['k'] == 'text']
+    check('検出枠が描かれる', len(rects) >= 2, len(rects))
+    check('固定された対象は橙の太枠', any(r['c'] == '#ff7a3d' and r['w'] == 4 for r in rects),
+          sorted({(r['c'], r['w']) for r in rects}))
+    check('固定されていない検出は普通の枠',
+          any(r['c'] != '#ff7a3d' and r['w'] == 2 for r in rects))
+    check('固定された対象のラベルに「対象」と出る',
+          any(t.startswith('対象 #2') for t in texts), texts[:4])
+    check('ほかの検出には「対象」と出ない',
+          any(t.startswith('#1') for t in texts) and not any(t.startswith('対象 #1') for t in texts),
+          texts[:4])
+    check('検出の数のタグ', page.inner_text('#tag-detections') == '検出 2',
+          page.inner_text('#tag-detections'))
 
     check('コンソールエラーなし', not errors, errors[:3])
     browser.close()

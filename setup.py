@@ -44,6 +44,7 @@ setup(
             'rviz_bridge = piper_arm_ui.rviz_bridge:main',
             'harvest_sequencer = piper_arm_ui.harvest_sequencer:main',
             'dummy_perception = piper_arm_ui.dummy_perception:main',
+            'lemon_detections = piper_arm_ui.lemon_detections:main',
         ],
     },
 )

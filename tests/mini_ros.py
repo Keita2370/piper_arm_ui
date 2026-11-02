@@ -22,19 +22,19 @@ class _Logger:
         if level in ('error', 'fatal'):
             print('[%s] [%s] %s' % (level, self.name, text))
 
-    def info(self, t):
+    def info(self, t, **_kw):    # throttle_duration_sec などは無視
         self._put('info', t)
 
-    def warn(self, t):
+    def warn(self, t, **_kw):    # throttle_duration_sec などは無視
         self._put('warn', t)
 
-    def error(self, t):
+    def error(self, t, **_kw):    # throttle_duration_sec などは無視
         self._put('error', t)
 
-    def fatal(self, t):
+    def fatal(self, t, **_kw):    # throttle_duration_sec などは無視
         self._put('fatal', t)
 
-    def debug(self, t):
+    def debug(self, t, **_kw):    # throttle_duration_sec などは無視
         self._put('debug', t)
 
     def text(self, level=None):
@@ -203,6 +203,7 @@ def install():
     sensor_msg.JointState = JointState
     sensor_msg.Image = _Msg
     sensor_msg.CompressedImage = _Msg
+    sensor_msg.CameraInfo = _Msg
     sensor.msg = sensor_msg
 
     std = types.ModuleType('std_msgs')

@@ -854,9 +854,13 @@
       const y = r.y + d.v * r.h - h / 2;
       const isSel = d.id === selected;
       const isHover = d.id === hoverId;
+      // locked: チームの lemon_target が固定した対象（lemon_detections が印を付ける）。
+      // UI 自身の選択（黄）とは別の色にする。両者はまだ連動していない
+      const isLocked = d.locked === true;
 
-      ctx.lineWidth = isSel ? 4 : 2;
-      ctx.strokeStyle = isSel ? '#ffd23f' : (isHover ? '#7fd1ff' : 'rgba(255,255,255,.75)');
+      ctx.lineWidth = isSel || isLocked ? 4 : 2;
+      ctx.strokeStyle = isSel ? '#ffd23f'
+        : (isLocked ? '#ff7a3d' : (isHover ? '#7fd1ff' : 'rgba(255,255,255,.75)'));
       ctx.strokeRect(x, y, w, h);
 
       if (isSel) {
@@ -870,12 +874,13 @@
         ctx.stroke();
       }
 
-      const label = `#${d.id}  ${(d.distance ?? 0).toFixed(2)}m  ${Math.round((d.confidence ?? 0) * 100)}%`;
+      const label = `${isLocked ? '対象 ' : ''}#${d.id}  ${(d.distance ?? 0).toFixed(2)}m  ${Math.round((d.confidence ?? 0) * 100)}%`;
       ctx.font = '12px system-ui, sans-serif';
       const tw = ctx.measureText(label).width + 10;
-      ctx.fillStyle = isSel ? 'rgba(255,210,63,.92)' : 'rgba(0,0,0,.62)';
+      ctx.fillStyle = isSel ? 'rgba(255,210,63,.92)'
+        : (isLocked ? 'rgba(255,122,61,.92)' : 'rgba(0,0,0,.62)');
       ctx.fillRect(x, y - 19, tw, 18);
-      ctx.fillStyle = isSel ? '#1a1405' : '#fff';
+      ctx.fillStyle = isSel || isLocked ? '#1a1405' : '#fff';
       ctx.fillText(label, x + 5, y - 6);
     });
   }

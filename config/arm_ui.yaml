@@ -152,6 +152,14 @@
     # 単位を mm で入れてしまったときに大きく飛ぶのを防ぐための歯止め。
     max_cartesian_step: 0.25
 
+/**/lemon_detections:
+  ros__parameters:
+    lemons_topic: "/lemon_ellipse/lemons"
+    camera_info_topic: "/camera/camera/color/camera_info"
+    target_topic: "/lemon_target/target"
+    # 固定された対象と検出を同じものとみなす距離 [m]
+    match_radius: 0.05
+
 /**/dummy_perception:
   ros__parameters:
     # 検出結果を模擬配信するレート [Hz]

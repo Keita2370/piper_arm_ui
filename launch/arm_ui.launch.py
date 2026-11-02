@@ -28,7 +28,7 @@ from launch.actions import (DeclareLaunchArgument, IncludeLaunchDescription,
                             OpaqueFunction)
 from launch.conditions import IfCondition
 from launch.launch_description_sources import PythonLaunchDescriptionSource
-from launch.substitutions import Command, LaunchConfiguration
+from launch.substitutions import Command, LaunchConfiguration, PythonExpression
 from launch_ros.actions import Node
 from launch_ros.parameter_descriptions import ParameterValue
 
@@ -215,6 +215,9 @@ def generate_launch_description():
                               description='UI から /joint_states を publish するか'),
         DeclareLaunchArgument('use_dummy_perception', default_value='true',
                               description='レモン検出のダミーを起動するか'),
+        DeclareLaunchArgument('use_lemon_detections', default_value='false',
+                              description='チームの検出（/lemon_ellipse/lemons）を画面に出すか。'
+                                          'true ならダミーの検出は起動しない'),
         DeclareLaunchArgument('start_rosbridge', default_value='true',
                               description='rosbridge_server を同時起動するか'),
         DeclareLaunchArgument('rosbridge_port', default_value='9090',
@@ -346,13 +349,27 @@ def generate_launch_description():
         }],
     )
 
+    # 本物の検出（チームの lemon_ellipse）を使うときはダミーを止める。
+    # 両方が /arm_ui/detections に出すと、検出枠が交互に入れ替わってちらつく
     perception = Node(
         package='piper_arm_ui',
         executable='dummy_perception',
         name='dummy_perception',
         output='screen',
         parameters=[params_file],
-        condition=IfCondition(LaunchConfiguration('use_dummy_perception')),
+        condition=IfCondition(PythonExpression([
+            "'", LaunchConfiguration('use_dummy_perception'), "' == 'true' and '",
+            LaunchConfiguration('use_lemon_detections'), "' != 'true'"])),
+    )
+
+    # 検出アダプタ: /lemon_ellipse/lemons → /arm_ui/detections（段階2。読むだけ）
+    lemon_detections = Node(
+        package='piper_arm_ui',
+        executable='lemon_detections',
+        name='lemon_detections',
+        output='screen',
+        parameters=[params_file],
+        condition=IfCondition(LaunchConfiguration('use_lemon_detections')),
     )
 
     rosbridge = Node(
@@ -371,7 +388,7 @@ def generate_launch_description():
         condition=IfCondition(LaunchConfiguration('start_rosbridge')),
     )
 
-    entries = [ui_server, rviz_bridge, sequencer, perception, rosbridge]
+    entries = [ui_server, rviz_bridge, sequencer, perception, lemon_detections, rosbridge]
 
     # RViz にアームを描くために robot_state_publisher を起動する。
     # piper の start_single_piper.launch.py は piper のノードしか起動せず、
