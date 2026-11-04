@@ -219,7 +219,8 @@ def _cmd_my_thing(self, cmd):
 
 | | |
 |---|---|
-| `README.md` | 起動オプション、トラブル対応、分散構成、座標指定の実機合わせ |
+| `README.md` | **いまの実機での使い方**（起動、1サイクルの操作、収穫位置の記録、停止、困ったとき） |
+| `docs/REFERENCE.md` | 旧 README。起動オプションの全部、RViz、分散構成、トピック一覧（本家構成が前提の部分あり） |
 | `docs/HANDOVER.md` | 設計の方針、データの流れ、3D の生成経路、運動学の中身 |
 | `docs/SETUP_dev_pc.md` | 開発用PCへの導入 |
 | `docs/SETUP_ubuntu2204_humble.md` | まっさらな Ubuntu からミニPCを作る |
