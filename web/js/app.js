@@ -73,6 +73,8 @@
     viewButtons: $('#view-buttons'),
     tagSource: $('#tag-source'),
     alertDup: $('#alert-dup'),
+    alertTracking: $('#alert-tracking'),
+    alertTrackingDetail: $('#alert-tracking-detail'),
     alertDupDetail: $('#alert-dup-detail'),
     alertRemote: $('#alert-remote'),
     remoteTitle: $('#remote-title'),
@@ -795,6 +797,18 @@
         ? `J${st.angle_limit_joints.join(', J')}` : 'なし',
       st.angle_limit_joints.length ? 'v-warn' : 'v-ok']);
     }
+    // コントローラの指令と実機のずれ。大きいと、アームが指令どおりに動いていない
+    const tr = state.tracking;
+    if (tr) {
+      rows.push(['指令と実機のずれ', `${tr.error.toFixed(2)} rad（${tr.joint}）`,
+        tr.alert ? 'v-bad' : (tr.error > 0.15 ? 'v-warn' : 'v-ok')]);
+    }
+    if (el.alertTracking) {
+      el.alertTracking.hidden = !(tr && tr.alert);
+      if (tr && tr.alert) {
+        el.alertTrackingDetail.textContent = `ずれ ${tr.error.toFixed(2)} rad（${tr.joint}）。`;
+      }
+    }
     if (st.comm_error_joints) {
       rows.push(['関節通信', st.comm_error_joints.length
         ? `異常 J${st.comm_error_joints.join(', J')}` : '正常',
@@ -806,8 +820,11 @@
 
   // backend:=lemon ではボタンの意味が変わるので、ラベルも変える（計画書 §5）。
   // 元のラベルは覚えておき、internal に戻ったら戻す
+  // home は犬が移動するときの畳んだ姿勢（2026-11-10 の arm_home の変更）。収穫の流れでは使わない。
+  // 開放は、開いたあと認識姿勢（レモンを探す姿勢）へ戻るところまで行う
   const LEMON_LABELS = {
-    start_selection: '対象を解除', plan_grasp: '把持姿勢へ移動', release: '開放',
+    start_selection: '対象を解除', plan_grasp: '把持姿勢へ移動', release: '開放 → 認識姿勢へ',
+    home: '移動姿勢へ（home）',
   };
   const originalLabels = {};
   function applyBackendLabels(lemon) {
@@ -825,6 +842,8 @@
     select: '対象を選択中', clear_exclusions: '除外をクリア中', stop: '停止を要求中',
     approach: '把持姿勢へ移動中', grasp: '把持中（差し込み・閉じる・戻り）',
     basket: '収穫位置へ移動中', joint_move: '関節を移動中（MoveIt）', gripper: 'グリッパを閉じています',
+    observe: '認識姿勢へ移動中', observe_right: '認識姿勢（右）へ移動中',
+    observe_left: '認識姿勢（左）へ移動中', release_sequence: '開放して認識姿勢へ戻っています',
   };
   function uiCallText(state) {
     const calls = state.calls || {};
@@ -851,14 +870,25 @@
       dd.className = kind ? `k-${kind}` : '';
     };
     if (!team) {
-      ['target', 'manager', 'approach', 'grasp', 'ui'].forEach((k) => put(k, '—', 'absent'));
+      ['target', 'manager', 'approach', 'grasp', 'harvest', 'ui'].forEach((k) => put(k, '—', 'absent'));
       return;
     }
     if (latest && latest.backend === 'lemon') {
       const [text, kind] = uiCallText(latest);
       put('ui', text, kind);
+      // arm_home の「収穫してよいか」。null は届いていない（古い arm_home・未起動）
+      const hv = latest.harvest || {};
+      const side = { right: '右', left: '左' }[hv.side] || '';
+      if (hv.enabled === true) {
+        put('harvest', `可（認識姿勢${side ? `・${side}` : ''}）`, 'ok');
+      } else if (hv.enabled === false) {
+        put('harvest', '不可（移動姿勢など）。「認識姿勢へ」を押してください', 'missed');
+      } else {
+        put('harvest', '—（arm_home から届いていません）', 'absent');
+      }
     } else {
       put('ui', '—（internal）', 'absent');
+      put('harvest', '—（internal）', 'absent');
     }
 
     const tg = team.target || {};
@@ -900,6 +930,15 @@
       // home / 開放 / 対象を解除 / 把持姿勢へ移動 / 把持 / 停止。収穫位置（§6）は隠す
       const on = !!state.enable_arm_command;
       const moving = !!state.motion_busy;
+      // 収穫できない（arm_home の harvest_enabled が false。移動姿勢など）間は、
+      // 把持姿勢へ移動・把持を押せない。届いていない（null）ときは止めない
+      const harvestOff = (state.harvest || {}).enabled === false;
+      const observe = $('#observe-row');
+      if (observe) observe.hidden = false;
+      $$('[data-cmd="observe"]').forEach((b) => {
+        b.disabled = !(on && !moving);
+        b.classList.toggle('is-active', (state.harvest || {}).side === b.dataset.side);
+      });
       const locked = !!(state.team && state.team.target && state.team.target.locked);
       // 収穫位置①②③: 記録した位置だけ押せる（測っていない位置へは動かさない）
       const baskets = state.baskets || {};
@@ -928,14 +967,16 @@
       enable('[data-cmd="start_selection"]', on && !moving && locked);
       // 把持姿勢へ移動: 対象が固定されているとき。
       // 把持: 同じ対象への接近が済んだ直後だけ（いまの姿勢から差し込むため）
-      enable('[data-cmd="plan_grasp"]', on && !moving && locked);
-      enable('[data-cmd="grasp"]', on && !moving && locked && !!state.approached);
+      enable('[data-cmd="plan_grasp"]', on && !moving && locked && !harvestOff);
+      enable('[data-cmd="grasp"]', on && !moving && locked && !!state.approached && !harvestOff);
       return;
     }
     const basket = $('#basket-row');
     if (basket) basket.hidden = false;
     const record = $('#basket-record');
     if (record) record.hidden = true;
+    const observe = $('#observe-row');
+    if (observe) observe.hidden = true;
     $$('[data-cmd="goto_basket"]').forEach((b) => { b.title = ''; });
     // lemon で押せなくしたものを戻す（internal ではいつでも押せる）
     enable(JOG_BUTTONS, true);
@@ -1049,6 +1090,14 @@
     btn.addEventListener('click', () => {
       const cmd = { cmd: btn.dataset.cmd };
       if (btn.dataset.index) cmd.index = Number(btn.dataset.index);
+      if (btn.dataset.side) cmd.side = btn.dataset.side;
+      // lemon の home は犬の移動姿勢。押すと対象と除外リストが消え、認識姿勢へ戻るまで
+      // 収穫できなくなる（arm_home の harvest_enabled が false になる）ので、確かめる
+      if (cmd.cmd === 'home' && latest && latest.backend === 'lemon'
+          && !window.confirm('移動姿勢（犬が移動するときの畳んだ姿勢）へ動きます。\n'
+            + '選んだ対象と除外リストは消え、「認識姿勢へ」を押すまで収穫できません。よろしいですか？')) {
+        return;
+      }
       sendCommand(cmd);
     });
   });

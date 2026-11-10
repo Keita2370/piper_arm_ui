@@ -40,6 +40,19 @@ TOPIC_TEAM_APPROACH_STATUS = '/lemon_approach/status'
 TOPIC_TEAM_GRASP_STATUS = '/lemon_grasp/status'
 # geometry_msgs/PointStamped（latched）。frame_id が空なら「対象なし」
 TOPIC_TEAM_TARGET = '/lemon_target/target'
+# arm_home が配信する（2026-11-10 の変更）。どちらも latched。
+#   harvest_enabled（std_msgs/Bool）: 収穫してよいか。認識姿勢（observe）に着くと true、
+#     home（犬の移動姿勢）へ動くと false。false の間は lemon_target / lemon_approach が断る
+#   observe_side（std_msgs/String）: いまの認識姿勢の向き（right / left）
+TOPIC_TEAM_HARVEST_ENABLED = '/arm_home/harvest_enabled'
+TOPIC_TEAM_OBSERVE_SIDE = '/arm_home/observe_side'
+# アームのコントローラ（JTC）の状態。指令（reference）と実機（feedback）のずれを見る
+TOPIC_ARM_CONTROLLER_STATE = '/arm_controller/controller_state'
+# 指令と実機のずれがこれを超えたら警告する [rad]。piper_joint_bridge は今の位置から
+# max_jump（0.3）より離れた指令を捨てるので、超えている間はアームが指令どおりに動かない
+TRACKING_WARN_RAD = 0.3
+# 一瞬超えただけでは出さない（動き出しの一瞬など）[s]
+TRACKING_WARN_HOLD = 0.5
 
 # 相手の status 文字列 → (種別, 画面表示)。
 # 種別: idle / busy / ok / missed / fail。表に無い文字列は呼び出し側で fail 扱いにする

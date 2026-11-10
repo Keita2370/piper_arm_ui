@@ -28,7 +28,7 @@ from rclpy.qos import DurabilityPolicy, HistoryPolicy, QoSProfile, ReliabilityPo
 
 from geometry_msgs.msg import PointStamped
 from sensor_msgs.msg import JointState
-from std_msgs.msg import String
+from std_msgs.msg import Bool, String
 
 from piper_arm_ui.common import (
     GRIPPER_CLOSED,
@@ -52,6 +52,11 @@ from piper_arm_ui.common import (
     TOPIC_TEAM_APPROACH_STATUS,
     TOPIC_TEAM_GRASP_STATUS,
     TOPIC_TEAM_MANAGER_STATUS,
+    TOPIC_TEAM_HARVEST_ENABLED,
+    TOPIC_TEAM_OBSERVE_SIDE,
+    TOPIC_ARM_CONTROLLER_STATE,
+    TRACKING_WARN_HOLD,
+    TRACKING_WARN_RAD,
     TOPIC_TEAM_TARGET,
     TOPIC_UI_COMMAND,
     TOPIC_UI_LOG,
@@ -66,10 +71,12 @@ from piper_arm_ui.team_status import TeamStatus
 #   start_selection → 対象を解除 / plan_grasp → 把持姿勢へ移動 / grasp → 把持 /
 #   home → home へ / release → 開放 / abort → 停止 /
 #   goto_basket → 記録した収穫位置へ / set_basket → いまの姿勢を収穫位置として記録 /
-#   jog・jog_xyz・move_to_xyz → 実機の関節角を基準に MoveIt で動かす / gripper → 開閉
+#   jog・jog_xyz・move_to_xyz → 実機の関節角を基準に MoveIt で動かす / gripper → 開閉 /
+#   observe → 認識姿勢（レモンを探す姿勢。右・左）へ
 LEMON_COMMANDS = ('set_enable', 'select_target', 'clear_exclusions',
                   'start_selection', 'plan_grasp', 'grasp', 'home', 'release', 'abort',
-                  'goto_basket', 'set_basket', 'jog', 'jog_xyz', 'move_to_xyz', 'gripper')
+                  'goto_basket', 'set_basket', 'jog', 'jog_xyz', 'move_to_xyz', 'gripper',
+                  'observe')
 
 # approach が済んだとみなす対象と、いまの対象が同じかの判定 [m]
 SAME_TARGET = 0.005
@@ -178,6 +185,22 @@ class HarvestSequencer(Node):
         self._stop_at = None
         self._last_jog_at = None        # 最後にジョグの指令を受け取った時刻
         self._jog_ignored = 0
+        # arm_home が配信する「収穫してよいか」と認識姿勢の向き（2026-11-10 の変更）。
+        # None は「まだ届いていない」（arm_home が古い版・未起動）。そのときは UI では
+        # 止めず、相手の判断に任せる（届いていない値で止めると、古い構成で何もできなくなる）
+        self.harvest_enabled = None
+        self.observe_side = None
+        # 続けて呼ぶ一連の動作（開放 → 対象を解除 → 認識姿勢へ）の名前と目印。
+        # 一連の途中でほかの動作を受け付けないように motion_busy() が見る。
+        # 停止を押したら目印を消し、残りの段に進まない
+        self._sequence = None
+        self._sequence_token = None
+        # コントローラの指令と実機のずれ（_on_controller_state）。
+        # 2026-11-11 の実機で、実機が軌道に追いつけず piper_joint_bridge が指令を捨て、
+        # アームが途中で止まったのに「着いた」扱いになった。画面で気づけるようにする
+        self.tracking = None            # {'error', 'joint', 't'}
+        self._tracking_over_since = None
+        self.tracking_alert = False
         self.step_duration = float(p('stub_step_duration').value)
         self.motion_speed = max(0, min(100, int(p('motion_speed').value)))
         self.gripper_effort = float(p('gripper_effort').value)
@@ -436,6 +459,58 @@ class HarvestSequencer(Node):
                              history=HistoryPolicy.KEEP_LAST)
         self.create_subscription(
             PointStamped, self._team_target_topic, self._on_team_target, latched)
+        self.create_subscription(
+            Bool, TOPIC_TEAM_HARVEST_ENABLED, self._on_harvest_enabled, latched)
+        self.create_subscription(
+            String, TOPIC_TEAM_OBSERVE_SIDE, self._on_observe_side, latched)
+        try:
+            from control_msgs.msg import JointTrajectoryControllerState
+            self.create_subscription(
+                JointTrajectoryControllerState, TOPIC_ARM_CONTROLLER_STATE,
+                self._on_controller_state, 1)
+        except ImportError as exc:
+            self.get_logger().warn('control_msgs が無いため、指令と実機のずれは見られません: %s'
+                                   % exc)
+
+    def _on_controller_state(self, msg):
+        """コントローラの指令と実機のずれ（いちばん大きい関節）を覚え、警告を出し入れする."""
+        ref = list(msg.reference.positions)
+        fb = list(msg.feedback.positions)
+        names = list(msg.joint_names)
+        if not ref or len(ref) != len(fb):
+            return
+        errs = [abs(a - b) for a, b in zip(ref, fb)]
+        i = max(range(len(errs)), key=lambda k: errs[k])
+        now = time.monotonic()
+        self.tracking = {'error': errs[i], 'joint': names[i] if i < len(names) else str(i),
+                         't': now}
+        if errs[i] > TRACKING_WARN_RAD:
+            if self._tracking_over_since is None:
+                self._tracking_over_since = now
+            if not self.tracking_alert and now - self._tracking_over_since >= TRACKING_WARN_HOLD:
+                self.tracking_alert = True
+                self._log('コントローラの指令と実機が %.2f rad（%s）ずれています。'
+                          'アームが指令どおりに動いていません（piper_joint_bridge が指令を捨てている）'
+                          % (errs[i], self.tracking['joint']), 'error')
+        else:
+            self._tracking_over_since = None
+            if self.tracking_alert:
+                self.tracking_alert = False
+                self._log('指令と実機のずれが戻りました（%.2f rad）' % errs[i], 'info')
+
+    def _on_harvest_enabled(self, msg):
+        enabled = bool(msg.data)
+        if enabled == self.harvest_enabled:
+            return
+        self.harvest_enabled = enabled
+        self._log('収穫できる状態になりました（認識姿勢）' if enabled
+                  else '収穫できない状態です（アームが移動姿勢など）。「認識姿勢へ」を押すと再開します',
+                  'info')
+
+    def _on_observe_side(self, msg):
+        side = str(msg.data or '').lower()
+        if side in ('right', 'left'):
+            self.observe_side = side
 
     def _check_team_presence(self):
         for source, topic in self._team_topics.items():
@@ -586,7 +661,7 @@ class HarvestSequencer(Node):
         caller = self.callers.get(key)
         if caller is None:
             self._log('%s: サービスが使えません（lemon_msgs が無い？）' % label, 'error')
-            return
+            return False
         def done(success, message):
             text = message or ('成功' if success else '失敗')
             level = 'info' if success else 'warn'
@@ -600,6 +675,9 @@ class HarvestSequencer(Node):
                 kind, desc = classify('grasp', message)
                 text = desc
                 level = {'ok': 'info', 'missed': 'warn'}.get(kind, 'warn')
+            elif not success:
+                from piper_arm_ui.team_status import explain
+                text = explain(text)
             self._log('%s: %s' % (label, text), level)
             if on_done:
                 on_done(success, message)
@@ -607,6 +685,8 @@ class HarvestSequencer(Node):
                 on_ok(message)
         if not caller.call(request, done):
             self._log('%s: 前の呼び出しがまだ終わっていません' % label, 'warn')
+            return False
+        return True
 
     def _motion_gate(self, label):
         """アームやグリッパが動く呼び出しの前に確かめる.
@@ -631,6 +711,8 @@ class HarvestSequencer(Node):
     def motion_busy(self):
         """動いている呼び出しの名前（無ければ None）."""
         from piper_arm_ui.lemon_backend import MOTION
+        if self._sequence:              # 一連の動作の途中（段と段の間も含む）
+            return self._sequence
         for key in MOTION:
             c = self.callers.get(key)
             if c is not None and c.busy:
@@ -655,6 +737,8 @@ class HarvestSequencer(Node):
         """「把持姿勢へ移動」: /lemon_approach/approach（★アームが大きく動く）."""
         if not self._motion_gate('把持姿勢へ移動'):
             return
+        if not self._harvest_gate('把持姿勢へ移動'):
+            return
         target = self._current_target()
         if target is None:
             self._log('把持姿勢へ移動: 先にレモンの枠をクリックして対象を選んでください', 'warn')
@@ -677,6 +761,8 @@ class HarvestSequencer(Node):
         """
         if not self._motion_gate('把持'):
             return
+        if not self._harvest_gate('把持'):
+            return
         if not self._approached_current():
             self._log('把持: 先に「把持姿勢へ移動」をしてください（同じ対象への接近が'
                       '済んだ直後だけ押せます）', 'warn')
@@ -695,20 +781,74 @@ class HarvestSequencer(Node):
         self._log('ホームへ移動します', 'info')
         self._call('go_home', Trigger.Request(), 'ホームへ戻す')
 
-    def _lemon_release(self, _cmd):
-        """「開放」: グリッパを開いてから対象を解除する（★グリッパが動く）.
+    def _harvest_gate(self, label):
+        """収穫してよい状態か（arm_home の harvest_enabled）。false なら理由を出して断る.
 
-        相手の manager と同じ順（opening → releasing）。開けなかったら対象は残す
-        （まだ掴んでいるかもしれないので、何が起きたか人が見て決める）。
+        届いていない（None）ときは止めない（古い arm_home でも使えるように。相手も断る）。
+        """
+        if self.harvest_enabled is False:
+            self._log('%s: 収穫できない状態です（アームが移動姿勢など）。'
+                      '先に「認識姿勢へ」を押してください' % label, 'warn')
+            return False
+        return True
+
+    def _lemon_observe(self, cmd):
+        """「認識姿勢へ（右／左）」: レモンを探す姿勢へ（★アームが動く）.
+
+        着くと arm_home が harvest_enabled を true にし、レモンを選べるようになる。
+        side が無ければ、いまの向きへ。
+        """
+        side = str(cmd.get('side') or '').lower()
+        key = 'observe_' + side if side in ('right', 'left') else 'observe'
+        label = '認識姿勢へ（%s）' % {'right': '右', 'left': '左'}.get(side, 'いまの向き')
+        if not self._motion_gate(label):
+            return
+        from std_srvs.srv import Trigger
+        self.approached = None          # pregrasp から離れる
+        self.basket_index = None
+        self._log('%sします' % label, 'info')
+        self._call(key, Trigger.Request(), label)
+
+    def _lemon_release(self, _cmd):
+        """「開放」: 開く → 対象を解除 → 認識姿勢へ戻る（★グリッパとアームが動く）.
+
+        相手の manager（auto_run）と同じ流れ。収穫位置でレモンを離したら、
+        レモンを探す姿勢（いまの向きの認識姿勢）へ戻って次に備える。
+        開けなかったら対象は残し、戻らない（まだ掴んでいるかもしれないので、
+        何が起きたか人が見て決める）。対象の解除に失敗しても（対象が無いなど）戻る。
+        途中で「停止」を押したら、残りの段には進まない。
         """
         if not self._motion_gate('開放'):
             return
         from std_srvs.srv import Trigger
         self.approached = None
+        token = object()
+        self._sequence, self._sequence_token = 'release_sequence', token
+
+        def finish(*_args):
+            if self._sequence_token is token:
+                self._sequence, self._sequence_token = None, None
+
+        def then_observe(_success, _message):
+            if self._sequence_token is not token:       # 停止で中断された
+                return
+            self.basket_index = None
+            if not self._call('observe', Trigger.Request(), '認識姿勢へ戻る', on_done=finish):
+                finish()
 
         def then_release(_message):
-            self._call('release', Trigger.Request(), '対象を解除')
-        self._call('open', Trigger.Request(), 'グリッパを開く', on_ok=then_release)
+            if self._sequence_token is not token:
+                return
+            if not self._call('release', Trigger.Request(), '対象を解除', on_done=then_observe):
+                finish()
+
+        def open_done(success, _message):
+            if not success:
+                finish()
+
+        if not self._call('open', Trigger.Request(), 'グリッパを開く',
+                          on_ok=then_release, on_done=open_done):
+            finish()
 
     def _lemon_start_selection(self, _cmd):
         """「対象を解除」（internal の「把持対象の選択」）: /lemon_target/release.
@@ -738,6 +878,7 @@ class HarvestSequencer(Node):
         """
         self._stop_at = time.monotonic()
         self.approached = None          # 止めた場所はどこか分からないので、やり直す
+        self._sequence, self._sequence_token = None, None   # 一連の動作の残りに進まない
         self._log('停止を要求しました（ソフト停止。非常停止ではありません）', 'warn')
         from std_srvs.srv import Trigger
         self._call('stop', Trigger.Request(), '把持の停止')
@@ -926,6 +1067,8 @@ class HarvestSequencer(Node):
         base_link への変換は lemon_target がする（TF を持っているのは相手）。
         """
         if not self._service_gate('対象の選択'):
+            return
+        if not self._harvest_gate('対象の選択'):
             return
         target_id = cmd.get('id')
         det = next((d for d in self.detections if d.get('id') == target_id), None)
@@ -1277,6 +1420,15 @@ class HarvestSequencer(Node):
             'motion_busy': self.motion_busy() if self.callers else None,
             # いまの対象への approach が済んでいる（＝「把持」を押してよい）
             'approached': self._approached_current() if self.callers else False,
+            # arm_home の「収穫してよいか」と認識姿勢の向き（None は未受信）
+            'harvest': {'enabled': self.harvest_enabled, 'side': self.observe_side},
+            # コントローラの指令と実機のずれ（いちばん大きい関節）。alert が true の間は
+            # アームが指令どおりに動いていない（画面の上に警告を出す）
+            'tracking': ({'error': round(self.tracking['error'], 3),
+                          'joint': self.tracking['joint'],
+                          'age': round(time.monotonic() - self.tracking['t'], 1),
+                          'alert': self.tracking_alert}
+                         if self.tracking else None),
             # 収穫位置①②③の記録（lemon）。記録していない位置へは動かさない
             'baskets': self.baskets.snapshot() if self.baskets else None,
             'stamp': time.time(),

@@ -77,8 +77,10 @@ YOLO が動かないと検出が来ず、`lemon_target` は対象を選べない
 ```bash
 # 1) CAN
 cd ~/piper_ros && bash can_activate.sh can0 1000000
-# 2) アーム + MoveIt + 手首カメラ（cam_* はカメラの取り付けの実測値。省略すると既定値）
-ros2 launch piper_real piper_real_bringup.launch.py
+# 2) アーム + MoveIt + 手首カメラ。cam_* はカメラの取り付けの実測値（2026-11-11）。
+#    省略するとレモンの約10cm上を掴みにいく。値の意味は src/piper_arm_ui/README.md
+ros2 launch piper_real piper_real_bringup.launch.py use_rviz:=false \
+    cam_x:=-0.06 cam_y:=-0.04 cam_z:=0.04 cam_roll:=0.0 cam_pitch:=-1.2217 cam_yaw:=0.0
 # 3) YOLO
 ros2 launch lemon_reach lemon_yolo.launch.py
 # 4) 収穫システム（UI が順に呼ぶので auto_run:=false。対象は人が選ぶ manual）

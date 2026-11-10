@@ -227,6 +227,11 @@ class _Trigger:
             self.message = message
 
 
+class Bool(_Msg):
+    def __init__(self, data=False):
+        self.data = data
+
+
 class String(_Msg):
     def __init__(self, data=''):
         self.data = data
@@ -301,6 +306,7 @@ def install():
     std = types.ModuleType('std_msgs')
     std_msg = types.ModuleType('std_msgs.msg')
     std_msg.String = String
+    std_msg.Bool = Bool
     std.msg = std_msg
 
     geometry = types.ModuleType('geometry_msgs')

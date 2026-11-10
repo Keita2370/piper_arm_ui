@@ -257,6 +257,7 @@ TIMEOUTS = {
     'approach': 120.0,      # 差し込める向きの探索＋MoveIt の計画（最大3回）＋実行
     'basket': 90.0,         # 収穫位置への MoveIt の実行
     'joint_move': 30.0,     # 関節ジョグ・座標指定（MoveIt の計画＋実行）
+    'observe': 90.0,        # 認識姿勢への MoveIt の計画（最大3回）＋実行（arm_home）
     'gripper': 10.0,
     'cancel_gripper': 5.0,
     'grasp': 120.0,         # 開く＋差し込み（servo_timeout 実機 40 s）＋閉じる＋戻り
@@ -264,7 +265,8 @@ TIMEOUTS = {
 }
 
 # アームやグリッパが動く呼び出し。同時に1つしか動かさない（harvest_sequencer が見る）
-MOTION = ('go_home', 'open', 'approach', 'grasp', 'basket', 'joint_move', 'gripper')
+MOTION = ('go_home', 'open', 'approach', 'grasp', 'basket', 'joint_move', 'gripper',
+          'observe', 'observe_right', 'observe_left')
 
 
 def make_callers(node, callback_group, timeouts=None):
@@ -285,6 +287,12 @@ def make_callers(node, callback_group, timeouts=None):
         'open': trig('open', '/lemon_grasp/open'),
         'stop': trig('stop', '/lemon_grasp/stop'),
         'approach': trig('approach', '/lemon_approach/approach'),
+        # 認識姿勢（レモンを探す姿勢。2026-11-10 の arm_home の変更）。
+        # observe はいまの向き、_right / _left は向きを切り替えてから動く。
+        # 着くと /arm_home/harvest_enabled が true になり、収穫できるようになる
+        'observe': trig('observe', '/arm_home/go_observe'),
+        'observe_right': trig('observe', '/arm_home/go_observe_right'),
+        'observe_left': trig('observe', '/arm_home/go_observe_left'),
         'grasp': trig('grasp', '/lemon_grasp/grasp'),
     }
     # 停止で、MoveIt の実行（home / approach）とコントローラに渡った軌道を取り消す。

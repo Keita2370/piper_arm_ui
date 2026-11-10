@@ -68,6 +68,21 @@ am.srv = am_srv
 sys.modules['action_msgs'] = am
 sys.modules['action_msgs.srv'] = am_srv
 
+# control_msgs/JointTrajectoryControllerState もどき（指令と実機のずれの警告用）
+cm = types.ModuleType('control_msgs')
+cm_msg = types.ModuleType('control_msgs.msg')
+cm_msg.JointTrajectoryControllerState = mini_ros._Msg
+cm.msg = cm_msg
+sys.modules['control_msgs'] = cm
+sys.modules['control_msgs.msg'] = cm_msg
+
+
+def controller_state(ref, fb):
+    return types.SimpleNamespace(
+        joint_names=['joint1', 'joint2', 'joint3', 'joint4', 'joint5', 'joint6'],
+        reference=types.SimpleNamespace(positions=list(ref)),
+        feedback=types.SimpleNamespace(positions=list(fb)))
+
 from piper_arm_ui.common import TOPIC_DETECTIONS, TOPIC_UI_COMMAND, TOPIC_UI_LOG, TOPIC_UI_STATE  # noqa: E402,E501
 
 FAIL = []
@@ -337,6 +352,8 @@ send({'cmd': 'release'})
 got = wait_log('対象を解除: Released')
 check('open のあとに release を呼ぶ', got is not None and
       names()[:2] == ['/lemon_grasp/open', '/lemon_target/release'], names())
+wait_log('認識姿勢へ戻る:')            # 一連（→ 認識姿勢へ）が終わるのを待つ
+time.sleep(0.1)
 mini_ros.SERVICES['/lemon_grasp/open'] = lambda _r: Resp(False, 'failed to open gripper')
 del mini_ros.SERVICE_CALLS[:]
 send({'cmd': 'release'})
@@ -465,9 +482,9 @@ check('停止のあとに返った失敗は「停止で止めました」', got 
 time.sleep(0.1)
 mini_ros.SERVICES['/arm_home/go_home'] = lambda _r: Resp(False, 'unreachable after 3 attempts')
 send({'cmd': 'home'})
-got = wait_log('ホームへ戻す: unreachable', 3.0)
-check('停止していない失敗はそのまま失敗と出す',
-      got is not None and '停止で止めました' not in got, got)
+got = wait_log('ホームへ戻す: 経路が見つかりませんでした', 3.0)
+check('停止していない失敗は失敗と出す（停止で止めた、とは言わない）',
+      got is not None and '停止で止めました' not in got and 'unreachable after 3' in got, got)
 
 # --------------------------------------------------------------------- #
 # 手動ジョグ・座標指定・グリッパ（lemon では MoveIt で動かす）
@@ -589,6 +606,164 @@ send({'cmd': 'jog_xyz', 'axis': 2, 'delta': 0.005})
 send({'cmd': 'jog_xyz', 'axis': 2, 'delta': 0.005})
 time.sleep(0.3)
 check('座標ジョグも続けざまは 1 回だけ', len(moves) - n == 1, len(moves) - n)
+
+# --------------------------------------------------------------------- #
+# 認識姿勢（2026-11-10 の arm_home の変更）: home は犬の移動姿勢、収穫は認識姿勢から
+# --------------------------------------------------------------------- #
+print('[認識姿勢へ（右／左／いまの向き）]')
+node = fresh_lemon()
+mini_ros.Node.publisher_counts['/lemon_harvest_manager/status'] = 0
+node.tick(3)
+send({'cmd': 'set_enable', 'value': True})
+for name in ('go_observe', 'go_observe_right', 'go_observe_left'):
+    mini_ros.SERVICES['/arm_home/' + name] = lambda _r: Resp(True, 'reached')
+del mini_ros.SERVICE_CALLS[:]
+send({'cmd': 'observe', 'side': 'right'})
+check('右: /arm_home/go_observe_right を呼ぶ',
+      wait_log('認識姿勢へ（右）: reached') is not None and names() == ['/arm_home/go_observe_right'],
+      names())
+del mini_ros.SERVICE_CALLS[:]
+send({'cmd': 'observe', 'side': 'left'})
+check('左: /arm_home/go_observe_left を呼ぶ',
+      wait_log('認識姿勢へ（左）: reached') is not None and names() == ['/arm_home/go_observe_left'],
+      names())
+del mini_ros.SERVICE_CALLS[:]
+send({'cmd': 'observe'})
+check('向きの指定が無ければ /arm_home/go_observe（いまの向き）',
+      wait_log('認識姿勢へ（いまの向き）: reached') is not None and names() == ['/arm_home/go_observe'],
+      names())
+send({'cmd': 'set_enable', 'value': False})
+del mini_ros.SERVICE_CALLS[:]
+send({'cmd': 'observe', 'side': 'right'})
+time.sleep(0.2)
+check('元栓が OFF なら認識姿勢へも動かさない', names() == [], names())
+send({'cmd': 'set_enable', 'value': True})
+
+print('[収穫してよいか（/arm_home/harvest_enabled）]')
+st = state(node)
+check('まだ届いていなければ None（止めない。古い arm_home でも使える）',
+      st['harvest'] == {'enabled': None, 'side': None}, st['harvest'])
+mini_ros.BUS.publish('/arm_home/harvest_enabled', mini_ros.Bool(False))
+mini_ros.BUS.publish('/arm_home/observe_side', mini_ros.String('left'))
+st = state(node)
+check('false と向きが状態に載る', st['harvest'] == {'enabled': False, 'side': 'left'}, st['harvest'])
+check('収穫できないことをログに出す', any('収穫できない状態です' in t for t in logs()))
+mini_ros.SERVICES['/lemon_target/select'] = lambda _r: Resp(True, 'Locked')
+mini_ros.SERVICES['/lemon_approach/approach'] = lambda _r: Resp(True, 'reached')
+detections([{'id': 1, 'u': 0.3, 'v': 0.5, 'w': 0.1, 'h': 0.1, 'distance': 0.34,
+             'xyz': [0.0, 0.0, 0.34], 'frame_id': 'camera_color_optical_frame'}])
+mini_ros.BUS.publish('/lemon_target/target', mini_ros.PointStamped('base_link', 0.36, 0.05, 0.03))
+del mini_ros.SERVICE_CALLS[:]
+send({'cmd': 'select_target', 'id': 1})
+send({'cmd': 'plan_grasp'})
+node.approached = (0.36, 0.05, 0.03)
+send({'cmd': 'grasp'})
+time.sleep(0.2)
+check('false の間は選択・把持姿勢へ移動・把持を呼ばない', names() == [], names())
+check('「認識姿勢へ」を押すよう促す',
+      sum('先に「認識姿勢へ」を押してください' in t for t in logs()) == 3)
+mini_ros.BUS.publish('/arm_home/harvest_enabled', mini_ros.Bool(True))
+send({'cmd': 'select_target', 'id': 1})
+check('true になれば選べる', wait_log('対象 #1 を選択: Locked') is not None, names())
+
+print('[相手の新しい失敗を、分かる言葉にする]')
+mini_ros.SERVICES['/arm_home/go_observe_left'] = lambda _r: Resp(False, 'observe_left is not set')
+send({'cmd': 'observe', 'side': 'left'})
+got = wait_log('認識姿勢へ（左）: 認識姿勢（左）が設定されていません')
+check('observe_left is not set → 設定されていない（yaml）と出す', got is not None, got)
+mini_ros.SERVICES['/lemon_approach/approach'] = lambda _r: Resp(False, 'harvest is disabled (arm is at home)')
+node.approached = None
+send({'cmd': 'plan_grasp'})
+got = wait_log('把持姿勢へ移動: 収穫できません')
+check('harvest is disabled → 「認識姿勢へ」を押すよう出す', got is not None and '認識姿勢へ' in got, got)
+mini_ros.SERVICES['/lemon_approach/approach'] = lambda _r: Resp(True, 'reached')
+
+print('[開放 = 開く → 対象を解除 → 認識姿勢へ戻る]')
+mini_ros.SERVICES['/lemon_grasp/open'] = lambda _r: Resp(True, 'opened')
+mini_ros.SERVICES['/lemon_target/release'] = lambda _r: Resp(True, 'Released')
+mini_ros.SERVICES['/arm_home/go_observe'] = lambda _r: Resp(True, 'reached')
+time.sleep(0.3)
+del mini_ros.SERVICE_CALLS[:]
+send({'cmd': 'release'})
+got = wait_log('認識姿勢へ戻る: reached')
+check('開く → 解除 → いまの向きの認識姿勢へ、の順に呼ぶ', got is not None and
+      names() == ['/lemon_grasp/open', '/lemon_target/release', '/arm_home/go_observe'], names())
+time.sleep(0.05)
+check('終わったら一連の動作中の印が消える', state(node)['motion_busy'] is None,
+      state(node)['motion_busy'])
+
+mini_ros.SERVICES['/lemon_target/release'] = lambda _r: Resp(False, 'No target is locked')
+del mini_ros.SERVICE_CALLS[:]
+send({'cmd': 'release'})
+got = wait_log('認識姿勢へ戻る: reached')
+time.sleep(0.05)
+check('対象が無くて解除に失敗しても、認識姿勢へは戻る',
+      names() == ['/lemon_grasp/open', '/lemon_target/release', '/arm_home/go_observe'], names())
+
+
+def slow_release(_r):
+    time.sleep(0.6)
+    return Resp(True, 'Released')
+
+
+mini_ros.SERVICES['/lemon_target/release'] = slow_release
+mini_ros.SERVICES['/arm_home/go_home'] = lambda _r: Resp(True, 'reached')
+time.sleep(0.1)
+del mini_ros.SERVICE_CALLS[:]
+send({'cmd': 'release'})
+time.sleep(0.2)
+check('一連の途中（段と段の間も）は motion_busy に出る',
+      state(node)['motion_busy'] is not None, state(node)['motion_busy'])
+send({'cmd': 'home'})
+time.sleep(0.1)
+check('一連の途中はほかの動作を呼ばない', '/arm_home/go_home' not in names(), names())
+mini_ros.SERVICES['/lemon_grasp/stop'] = lambda _r: Resp(True, 'not grasping')
+send({'cmd': 'abort'})
+time.sleep(0.9)
+check('途中で停止を押したら、認識姿勢へは戻らない', '/arm_home/go_observe' not in names(), names())
+check('停止のあとは一連の印が消える（次の操作ができる）', state(node)['motion_busy'] is None,
+      state(node)['motion_busy'])
+
+# --------------------------------------------------------------------- #
+# 指令と実機のずれの警告（2026-11-11: ブリッジが指令を捨て、途中で止まったのに「着いた」扱い）
+# --------------------------------------------------------------------- #
+print('[指令と実機のずれ]')
+node = fresh_lemon()
+REF = [-0.2946, 0.5121, -0.6468, -1.6214, 1.2183, 0.8093]      # 実機で見た値
+STUCK = [0.3416, 0.4554, -0.7388, 0.8425, 1.0478, -0.8318]
+mini_ros.BUS.publish('/arm_controller/controller_state', controller_state(REF, REF))
+st = state(node)
+check('ずれが無ければ 0 で、警告しない', st['tracking']['error'] == 0 and st['tracking']['alert'] is False,
+      st['tracking'])
+mini_ros.BUS.clear()
+mini_ros.BUS.publish('/arm_controller/controller_state', controller_state(REF, STUCK))
+st = state(node)
+check('いちばん大きくずれた関節とずれを出す（joint4 2.46 rad）',
+      st['tracking']['joint'] == 'joint4' and abs(st['tracking']['error'] - 2.4639) < 0.001,
+      st['tracking'])
+check('超えた直後はまだ警告しない（一瞬のずれでは出さない）', st['tracking']['alert'] is False)
+time.sleep(0.6)
+mini_ros.BUS.publish('/arm_controller/controller_state', controller_state(REF, STUCK))
+st = state(node)
+check('0.5 秒続いたら警告する', st['tracking']['alert'] is True, st['tracking'])
+check('警告をログに error で出す',
+      any(json.loads(m.data)['level'] == 'error' and 'アームが指令どおりに動いていません' in json.loads(m.data)['text']
+          for m in mini_ros.BUS.sent.get(TOPIC_UI_LOG, [])))
+n_err = sum('アームが指令どおり' in t for t in logs())
+time.sleep(0.1)
+mini_ros.BUS.publish('/arm_controller/controller_state', controller_state(REF, STUCK))
+check('続いている間はログを重ねない', sum('アームが指令どおり' in t for t in logs()) == n_err)
+mini_ros.BUS.publish('/arm_controller/controller_state',
+                     controller_state(REF, [v + 0.05 for v in REF]))
+st = state(node)
+check('ずれが 0.3 rad 未満に戻ったら警告を消す', st['tracking']['alert'] is False, st['tracking'])
+check('戻ったこともログに出す', any('ずれが戻りました' in t for t in logs()))
+mini_ros.BUS.publish('/arm_controller/controller_state', controller_state(REF, [v + 0.32 for v in REF]))
+time.sleep(0.2)
+mini_ros.BUS.publish('/arm_controller/controller_state', controller_state(REF, REF))
+time.sleep(0.4)
+mini_ros.BUS.publish('/arm_controller/controller_state', controller_state(REF, [v + 0.32 for v in REF]))
+check('途中で戻ったら、続いた時間は数え直す', state(node)['tracking']['alert'] is False)
 
 # --------------------------------------------------------------------- #
 print('[internal は従来どおり]')

@@ -79,10 +79,9 @@ print('[分類]')
 check('manager の waiting_target は idle', classify('manager', 'waiting_target')[0] == 'idle')
 check('manager の error は fail', classify('manager', 'error')[0] == 'fail')
 check('approach の reached は ok', classify('approach', 'reached')[0] == 'ok')
-check('approach の unreachable は fail（素通し）',
-      classify('approach', 'unreachable after 3 attempts')
-      == ('fail', 'unreachable after 3 attempts'),
-      classify('approach', 'unreachable after 3 attempts'))
+check('approach の知らない失敗は fail（素通し）',
+      classify('approach', 'execution failed') == ('fail', 'execution failed'),
+      classify('approach', 'execution failed'))
 check('grasp の grasped は ok', classify('grasp', 'grasped')[0] == 'ok')
 
 k, label = classify('grasp', 'missed (gripper closed to 0.002000)')
@@ -95,6 +94,14 @@ check('missed でも戻りに失敗していたら fail', k == 'fail', k)
 check('insertion failed は fail', classify('grasp', 'insertion failed: timeout')[0] == 'fail')
 k, label = classify('grasp', 'stopped (while inserting)')
 check('stop で止めたのは fail ではなく stopped', k == 'stopped', k)
+from piper_arm_ui.team_status import explain  # noqa: E402
+k_ins, label_ins = classify('approach', 'cannot insert straight into the lemon')
+check('差し込めない: 次にすること（位置を変える・別のレモン）を出し、元の文字列も残す',
+      k_ins == 'fail' and '別のレモン' in label_ins and 'cannot insert straight' in label_ins, label_ins)
+check('経路が見つからない（unreachable after 3 attempts）も言い換える。把持に限らない言い方',
+      '経路が見つかりませんでした' in explain('unreachable after 3 attempts')
+      and '把持' not in explain('unreachable after 3 attempts'))
+check('知らない失敗はそのまま', explain('arm goal rejected') == 'arm goal rejected')
 check('止めたらアームがその場に残ると出す', 'その場に残っています' in label, label)
 
 k, label = classify('grasp', 'opening')
@@ -148,8 +155,8 @@ mini_ros.BUS.sent.pop(TOPIC_UI_LOG, None)
 status(TOPIC_TEAM_APPROACH_STATUS, 'unreachable after 3 attempts')
 team = team_of(node)
 check('approach の失敗は fail', team['approach']['kind'] == 'fail', team['approach'])
-check('失敗の message をそのまま表示に使う',
-      team['approach']['label'] == 'unreachable after 3 attempts', team['approach'])
+check('失敗の表示に元の message も残す',
+      'unreachable after 3 attempts' in team['approach']['label'], team['approach'])
 check('失敗はログに error で出る', ui_logs() and ui_logs()[-1]['level'] == 'error', ui_logs())
 
 # manager が後から現れた（auto_run:=true で起動し直した）

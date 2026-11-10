@@ -292,8 +292,10 @@ with sync_playwright() as pw:
           page.is_visible('.estop-note') and '非常停止ではありません' in page.inner_text('.estop-note'))
     check('lemon では「把持対象の選択」が「対象を解除」になる',
           page.inner_text('.act[data-cmd="start_selection"]') == '対象を解除')
-    check('lemon では「開放（収穫完了）」が「開放」になる',
-          page.inner_text('.act[data-cmd="release"]') == '開放')
+    check('lemon では「開放（収穫完了）」が「開放 → 認識姿勢へ」になる',
+          page.inner_text('.act[data-cmd="release"]') == '開放 → 認識姿勢へ')
+    check('lemon では「ホームへ戻す」が「移動姿勢へ（home）」になる',
+          page.inner_text('.act[data-cmd="home"]') == '移動姿勢へ（home）')
     check('lemon でも収穫位置①②③を出す', page.is_visible('#basket-row'))
     check('記録していない収穫位置は押せない（測っていない位置へは動かさない）',
           all(page.is_disabled('.act[data-cmd="goto_basket"][data-index="%d"]' % i) for i in (1, 2, 3)))
@@ -525,6 +527,74 @@ with sync_playwright() as pw:
           '%d 回' % len(jog_cmds()))
     page.evaluate('(s) => { document.querySelector(s).disabled = false; }', jog_btn)
 
+    # ---- 認識姿勢と収穫可否（2026-11-10 の arm_home の変更）-------------------------
+    stack.state = dict(lemon, harvest={'enabled': True, 'side': 'right'})
+    settle(page)
+    check('lemon では「認識姿勢 右・左」を出す', page.is_visible('#observe-row'))
+    check('いまの向き（右）を強調する',
+          'is-active' in (page.get_attribute('[data-cmd="observe"][data-side="right"]', 'class') or '')
+          and 'is-active' not in (page.get_attribute('[data-cmd="observe"][data-side="left"]', 'class') or ''))
+    check('収穫可否: 可（認識姿勢・右）', row(page, 'harvest') == ('可（認識姿勢・右）', 'k-ok'),
+          row(page, 'harvest'))
+    stack.published.clear()
+    page.click('[data-cmd="observe"][data-side="left"]')
+    page.wait_for_timeout(300)
+    cmds = [json.loads(op['msg']['data']) for op in stack.published
+            if op.get('topic') == '/arm_ui/command']
+    check('「左」を押すと observe side=left を送る', {'cmd': 'observe', 'side': 'left'} in cmds, cmds)
+
+    stack.state = dict(lemon, harvest={'enabled': False, 'side': 'right'}, approached=True)
+    settle(page)
+    check('収穫可否: 不可なら「認識姿勢へ」を押すよう出す（黄）',
+          '認識姿勢へ' in row(page, 'harvest')[0] and 'k-missed' in row(page, 'harvest')[1],
+          row(page, 'harvest'))
+    check('収穫できない間は把持姿勢へ移動も把持も押せない',
+          page.is_disabled('.act[data-cmd="plan_grasp"]') and page.is_disabled('.act[data-cmd="grasp"]'))
+    check('収穫できない間も認識姿勢へは押せる',
+          not page.is_disabled('[data-cmd="observe"][data-side="right"]'))
+    stack.state = dict(lemon, harvest={'enabled': None, 'side': None})
+    settle(page)
+    check('届いていなければ「—」で、把持姿勢へ移動は止めない（古い arm_home でも使える）',
+          row(page, 'harvest')[0].startswith('—') and not page.is_disabled('.act[data-cmd="plan_grasp"]'),
+          row(page, 'harvest'))
+
+    def home_cmds():
+        return [json.loads(op['msg']['data']) for op in stack.published
+                if op.get('topic') == '/arm_ui/command'
+                and json.loads(op['msg']['data']).get('cmd') == 'home']
+
+    stack.state = dict(lemon)
+    settle(page)
+    dialogs = []
+    page.once('dialog', lambda d: (dialogs.append(d.message), d.dismiss()))
+    stack.published.clear()
+    page.click('.act[data-cmd="home"]')
+    page.wait_for_timeout(300)
+    check('移動姿勢へは確認を出す（対象と除外が消える）',
+          dialogs and '移動姿勢' in dialogs[0] and '除外' in dialogs[0], dialogs)
+    check('確認で「キャンセル」なら送らない', home_cmds() == [], home_cmds())
+    page.once('dialog', lambda d: d.accept())
+    stack.published.clear()
+    page.click('.act[data-cmd="home"]')
+    page.wait_for_timeout(300)
+    check('確認で「OK」なら送る', home_cmds() == [{'cmd': 'home'}], home_cmds())
+
+    # ---- 指令と実機のずれの警告 ------------------------------------------------
+    stack.state = dict(lemon, tracking={'error': 0.02, 'joint': 'joint1', 'age': 0.0, 'alert': False})
+    settle(page)
+    check('ずれが小さければ警告の帯を出さない', not page.is_visible('#alert-tracking'))
+    check('「指令と実機のずれ」を状態の表に出す', '0.02 rad（joint1）' in page.inner_text('#readout'),
+          page.inner_text('#readout')[-120:])
+    stack.state = dict(lemon, tracking={'error': 2.46, 'joint': 'joint4', 'age': 0.0, 'alert': True})
+    settle(page)
+    check('ずれが続いたら警告の帯を出す', page.is_visible('#alert-tracking'))
+    check('警告に、ずれと関節と、解消のしかた（ジョグ）を出す',
+          '2.46 rad（joint4）' in page.inner_text('#alert-tracking')
+          and 'ジョグ' in page.inner_text('#alert-tracking'), page.inner_text('#alert-tracking'))
+    stack.state = dict(lemon, tracking={'error': 0.05, 'joint': 'joint4', 'age': 0.0, 'alert': False})
+    settle(page)
+    check('戻ったら警告の帯を消す', not page.is_visible('#alert-tracking'))
+
     stack.state = dict(BASE_STATE, team=team())          # internal に戻す
     settle(page)
     check('internal では元のラベルに戻る',
@@ -532,6 +602,9 @@ with sync_playwright() as pw:
           and page.inner_text('.act[data-cmd="plan_grasp"]') == '把持（把持姿勢の計算）'
           and page.inner_text('.act[data-cmd="release"]') == '開放（収穫完了）')
     check('internal では収穫位置を出す', page.is_visible('#basket-row'))
+    check('internal では「認識姿勢」を出さない', not page.is_visible('#observe-row'))
+    check('internal では「ホームへ戻す」のまま',
+          page.inner_text('.act[data-cmd="home"]') == 'ホームへ戻す')
     marks, _ = map_marks()
     check('internal の図は従来どおり設定の 3 か所', set(marks) == {'①', '②', '③'}, marks)
     check('internal では「収穫位置の記録」を出さない', not page.is_visible('#basket-record > summary'))

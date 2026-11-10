@@ -18,6 +18,35 @@ from piper_arm_ui.common import TEAM_STATUS_LABELS
 SOURCES = ('manager', 'approach', 'grasp')
 
 
+# 相手が返す失敗の message のうち、画面で言い換えたほうが次の操作が分かるもの。
+# 前方一致で引く（'observe_left is not set' などの後ろに続きが付いても拾える）
+EXPLAIN = (
+    ('harvest is disabled', '収穫できません（アームが移動姿勢です）。先に「認識姿勢へ」を押してください'),
+    ('observe_right is not set', '認識姿勢（右）が設定されていません（lemon_reach の harvest_sequence.yaml）'),
+    ('observe_left is not set', '認識姿勢（左）が設定されていません（lemon_reach の harvest_sequence.yaml）'),
+    ('collect is not set', '回収姿勢が設定されていません（lemon_reach の harvest_sequence.yaml）'),
+    ('home is not set', '移動姿勢（home）が設定されていません'),
+    ('home is not recorded', '移動姿勢（home）が記録されていません'),
+    # lemon_approach（把持姿勢へ移動）の失敗。どれもアームは動いていない
+    ('cannot insert straight into the lemon',
+     'このレモンには、まっすぐ差し込める向きがありません（高すぎる・横すぎる・遠すぎる）。'
+     'レモンの位置を変えるか、別のレモンを選んでください'),
+    ('failed to compute pregrasp', '把持姿勢を計算できませんでした（対象の位置が取れない）。選び直してください'),
+    ('no target', '対象が選ばれていません。レモンの枠をクリックしてください'),
+    # MoveIt の計画の失敗。把持姿勢・home・認識姿勢・回収姿勢のどれでも返る
+    ('unreachable after', '経路が見つかりませんでした（MoveIt。届かない・可動域・干渉）'),
+)
+
+
+def explain(text):
+    """相手の message を、画面で分かる言葉にする（知らないものはそのまま）."""
+    text = (text or '').strip()
+    for key, desc in EXPLAIN:
+        if text.startswith(key):
+            return '%s（%s）' % (desc, text)
+    return text
+
+
 def classify(source, text):
     """status 文字列を (種別, 画面表示) にする.
 
@@ -40,7 +69,8 @@ def classify(source, text):
         if text.startswith('stopped'):
             return ('stopped', '停止しました（%s）。アームはその場に残っています' % text)
     # 相手は失敗の message をそのまま status に流す。列挙しきれないので素通し
-    return ('fail', text)
+    # （ただし次の操作が分かるものは言い換える）
+    return ('fail', explain(text))
 
 
 class TeamStatus:

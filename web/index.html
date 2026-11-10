@@ -48,6 +48,15 @@
 </div>
 
 <!-- ノードの二重起動を検出したときの警告（通常は非表示） -->
+<!-- コントローラの指令と実機がずれている（アームが指令どおりに動いていない）。通常は非表示 -->
+<div class="alert" id="alert-tracking" hidden>
+  <strong>アームが指令どおりに動いていません。</strong>
+  <span id="alert-tracking-detail"></span>
+  piper_joint_bridge が、今の位置から離れすぎた指令を捨てています。
+  止まっているなら、手動ジョグで 1 回（0.02 rad）動かすと指令が今の位置に置き直されて解消します。
+  手でアームを動かすと、指令に近づいた瞬間に急に動き出すことがあるので注意してください。
+</div>
+
 <div class="alert" id="alert-dup" hidden>
   <strong>harvest_sequencer が二重に起動しています。</strong>
   <span id="alert-dup-detail"></span>
@@ -143,11 +152,20 @@
           <div data-team="manager"><dt>マネージャ</dt><dd>—</dd></div>
           <div data-team="approach"><dt>接近</dt><dd>—</dd></div>
           <div data-team="grasp"><dt>把持</dt><dd>—</dd></div>
+          <div data-team="harvest"><dt>収穫可否</dt><dd>—</dd></div>
           <div data-team="ui"><dt>UI の操作</dt><dd>—</dd></div>
         </dl>
       </div>
 
       <div class="actions">
+        <!-- 認識姿勢（レモンを探す姿勢）。backend:=lemon のときだけ出す。
+             起動直後と、移動姿勢（home）から戻るときは、まずこれを押す
+             （arm_home の harvest_enabled が true になるまで、レモンを選べない） -->
+        <div class="act-row" id="observe-row" hidden>
+          <span class="act-row-label">認識姿勢</span>
+          <button class="act act-mini" data-cmd="observe" data-side="right">右</button>
+          <button class="act act-mini" data-cmd="observe" data-side="left">左</button>
+        </div>
         <button class="act" data-cmd="start_selection">把持対象の選択</button>
         <button class="act" data-cmd="plan_grasp">把持（把持姿勢の計算）</button>
         <button class="act act-primary" data-cmd="grasp">把持</button>
